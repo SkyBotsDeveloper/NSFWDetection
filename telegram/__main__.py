@@ -8,9 +8,9 @@ import logging
 loop = asyncio.get_event_loop()
 
 
-imported_module = importlib.import_module("antinsfw.antinsfw")
-imported_module = importlib.import_module("antinsfw.stats")
-imported_module = importlib.import_module("antinsfw.db")
+imported_module = importlib.import_module("telegram.antinsfw")
+imported_module = importlib.import_module("telegram.stats")
+imported_module = importlib.import_module("telegram.db")
 
 async def gae():
     install()
