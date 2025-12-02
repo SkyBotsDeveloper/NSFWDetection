@@ -3,7 +3,7 @@ pillow
 pyrogram
 torch
 opencv-python
-uvloop
+uvloop<0.21.0
 cryptg
 tgcrypto
 motor
