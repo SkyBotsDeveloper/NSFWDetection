@@ -49,7 +49,7 @@ async def getimage(client, event):
     if event.photo:
         file_id = event.photo.file_id
 
-        # Skip heavy model if we already know it's NSFW
+        # Fast path: if DB already knows this file_id is NSFW, delete immediately
         if await is_nsfw(file_id):
             await send_msg(event)
             return
@@ -58,9 +58,7 @@ async def getimage(client, event):
             file_path = await client.download_media(event.photo)
         except Exception as e:
             logger.error("Failed to download image. Error: %s", e)
-            # Can't scan => be safe and treat as NSFW
-            await add_nsfw(file_id)
-            await send_msg(event)
+            # Can't scan -> do nothing, don't delete, don't mark NSFW
             return
 
     # Stickers
@@ -77,9 +75,7 @@ async def getimage(client, event):
                 file_path = await client.download_media(event.sticker)
             except Exception as e:
                 logger.error("Failed to download animated sticker. Error: %s", e)
-                # If we can't even download it, be safe and treat it as NSFW
-                await add_nsfw(file_id)
-                await send_msg(event)
+                # Can't scan -> ignore
                 return
 
             # Handle like a video and then stop
@@ -92,8 +88,7 @@ async def getimage(client, event):
                 file_path = await client.download_media(event.sticker)
             except Exception as e:
                 logger.error("Failed to download sticker. Error: %s", e)
-                await add_nsfw(file_id)
-                await send_msg(event)
+                # Can't scan -> ignore
                 return
 
     # GIF / animation
@@ -108,8 +103,7 @@ async def getimage(client, event):
             file_path = await client.download_media(event.animation)
         except Exception as e:
             logger.error("Failed to download GIF. Error: %s", e)
-            await add_nsfw(file_id)
-            await send_msg(event)
+            # Can't scan -> ignore
             return
 
         await videoShit(event, file_path, file_id)
@@ -127,8 +121,7 @@ async def getimage(client, event):
             file_path = await client.download_media(event.video)
         except Exception as e:
             logger.error("Failed to download video. Error: %s", e)
-            await add_nsfw(file_id)
-            await send_msg(event)
+            # Can't scan -> ignore
             return
 
         await videoShit(event, file_path, file_id)
@@ -141,16 +134,14 @@ async def getimage(client, event):
     # From here on, we expect an image file at file_path
     if not file_path or not os.path.exists(file_path):
         logger.error("Downloaded image file does not exist: %s", file_path)
-        await add_nsfw(file_id)
-        await send_msg(event)
+        # Can't scan -> ignore (do NOT mark/delete)
         return
 
     try:
         img = Image.open(file_path).convert("RGB")
     except Exception as e:
         logger.error("Failed to open image %s: %s", file_path, e)
-        await add_nsfw(file_id)
-        await send_msg(event)
+        # Can't scan -> ignore
         return
 
     # Run NSFW model
@@ -163,8 +154,8 @@ async def getimage(client, event):
 
     # 1 means nsfw for this model
     if predicted_label:
-        await add_nsfw(file_id)
-        await send_msg(event)  # this handles spam logic + warnings
+        await add_nsfw(file_id)   # store in DB so future sends are instant
+        await send_msg(event)     # delete + warn (with anti-spam logic)
     else:
         await remove_nsfw(file_id)
 
@@ -196,7 +187,7 @@ async def start(_, event):
 
 async def send_msg(event):
     """
-    Send a message when NSFW content is detected.
+    Called only when something is CONFIRMED NSFW (by model or DB).
     In groups: delete the message, then send a warning (rate-limited).
     In private: reply with a simple notice.
 
@@ -239,9 +230,9 @@ async def send_msg(event):
                 data = user_nsfw_count[(chat_id, user_id)]
 
                 # Build a mention so admins see exactly who it is
-                if hasattr(user, "mention") and user.mention:
+                if hasattr(user, "mention") and callable(getattr(user, "mention", None)):
                     user_mention = user.mention
-                elif user.username:
+                elif getattr(user, "username", None):
                     user_mention = f"@{user.username}"
                 else:
                     user_mention = user.first_name or "this user"
@@ -307,7 +298,7 @@ async def videoShit(event, video_path, file_id):
     - Take screenshots every 10 seconds.
     - Run NSFW model on each frame.
     - If any frame is NSFW, treat the whole file as NSFW.
-    - If we can't process frames at all, be safe and treat as NSFW.
+    - If we can't process frames at all, we DO NOT delete. (no false positives)
     """
 
     # Double-check cache
@@ -320,10 +311,7 @@ async def videoShit(event, video_path, file_id):
 
     if not image_names:
         logger.error("No frames captured from video: %s", video_path)
-        # We couldn't scan it, so treat as NSFW to be safe
-        await add_nsfw(file_id)
-        await send_msg(event)
-        # Clean up video file
+        # Can't scan this video/sticker -> ignore it (may miss NSFW but no false delete)
         try:
             os.remove(video_path)
         except OSError:
