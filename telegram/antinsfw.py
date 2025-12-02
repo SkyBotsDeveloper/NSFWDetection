@@ -4,7 +4,10 @@ import logging
 import cv2
 from PIL import Image
 import torch
-from pyrogram import Client, filters
+
+from telegram import client       # your existing pyrogram.Client instance
+from pyrogram import filters
+from pyrogram.enums import ChatType
 from transformers import AutoModelForImageClassification, ViTImageProcessor
 
 logger = logging.getLogger(__name__)
@@ -14,16 +17,15 @@ logger = logging.getLogger(__name__)
 device = "cuda" if torch.cuda.is_available() else "cpu"
 logger.info(f"[NSFW BOT] Using device: {device}")
 
-# Main NSFW model (same as before)
 model = AutoModelForImageClassification.from_pretrained(
     "Falconsai/nsfw_image_detection"
 ).to(device)
 processor = ViTImageProcessor.from_pretrained("Falconsai/nsfw_image_detection")
 
-# We assume index 1 in logits is NSFW
+# We assume index 1 in logits is NSFW (this matches earlier usage)
 NSFW_INDEX = 1
 
-# Thresholds for different content types
+# Thresholds (tune these if needed)
 PHOTO_THRESHOLD = 0.70    # photos, image documents
 VIDEO_THRESHOLD = 0.70    # frames from video / gif / video sticker
 STICKER_THRESHOLD = 0.90  # static stickers only deleted if VERY likely NSFW
@@ -38,6 +40,7 @@ def classify_nsfw_prob(img: Image.Image) -> float:
         inputs = processor(images=img, return_tensors="pt")
         for k in inputs:
             inputs[k] = inputs[k].to(device)
+
         outputs = model(**inputs)
         logits = outputs.logits[0]
         probs = torch.softmax(logits, dim=-1)
@@ -64,6 +67,7 @@ def is_nsfw_image(img: Image.Image, kind: str) -> bool:
     logger.debug(
         f"[NSFW BOT] kind={kind}, nsfw_prob={nsfw_prob:.3f}, threshold={threshold:.3f}"
     )
+
     return nsfw_prob >= threshold
 
 
@@ -73,11 +77,12 @@ def capture_frames(path: str, max_frames: int = 8) -> list[str]:
     Returns a list of image file paths.
     """
     vid = cv2.VideoCapture(path)
-    saved = []
+    saved: list[str] = []
 
     total_frames = int(vid.get(cv2.CAP_PROP_FRAME_COUNT))
 
     if total_frames > 0:
+        # Evenly sample frames
         step = max(total_frames // max_frames, 1)
         targets = set(i * step for i in range(max_frames) if i * step < total_frames)
 
@@ -91,7 +96,7 @@ def capture_frames(path: str, max_frames: int = 8) -> list[str]:
             idx += 1
             success, frame = vid.read()
     else:
-        # Fallback: capture every ~10 seconds
+        # Fallback: every ~10 seconds
         fps = vid.get(cv2.CAP_PROP_FPS)
         if fps <= 0:
             fps = 25
@@ -111,47 +116,43 @@ def capture_frames(path: str, max_frames: int = 8) -> list[str]:
     return saved
 
 
-async def handle_nsfw_result(client: Client, message, is_nsfw: bool):
+async def delete_nsfw_message(message):
     """
-    What to do once we've decided if something is NSFW.
-    Right now just logs. You can:
-      - delete message
-      - reply
-      - update DB
-      - etc.
+    What happens when we are SURE the content is NSFW.
+    Only deletes NSFW content. No DB, no spam logic.
     """
-    if is_nsfw:
-        logger.info(
-            f"[NSFW BOT] NSFW detected in chat {message.chat.id}, message {message.id}"
-        )
-        # Example: delete message in groups
-        # try:
-        #     await message.delete()
-        # except Exception:
-        #     pass
-        #
-        # Example: reply in private
-        # if message.chat.type == "private":
-        #     await message.reply("NSFW detected.")
+    if message.chat.type in (ChatType.SUPERGROUP, ChatType.GROUP):
+        # In groups, just delete the message and send a simple warning
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        try:
+            await message.chat.send_message("🚫 NSFW content detected and removed.")
+        except Exception:
+            pass
     else:
-        logger.info(
-            f"[NSFW BOT] SAFE content in chat {message.chat.id}, message {message.id}"
-        )
+        # In private: just reply
+        try:
+            await message.reply("🚫 NSFW content detected.")
+        except Exception:
+            pass
 
 
 # ------------------ MAIN HANDLER ------------------
 
-@Client.on_message(
+
+@client.on_message(
     filters.incoming
     & (
         filters.photo
         | filters.sticker
         | filters.animation
         | filters.video
-        | (filters.document & filters.document.image)
+        | filters.document
     )
 )
-async def getimage(client: Client, message):
+async def getimage(client, message):
     """
     Handles:
       - photos
@@ -160,12 +161,14 @@ async def getimage(client: Client, message):
       - animations (GIF / MPEG4)
       - videos
       - documents that are images
+
+    Only deletes when detection is confident enough.
     """
 
     file_path = None
-    kind = "photo"  # default
+    kind = "photo"  # default kind
 
-    # ---------------- PHOTOS ----------------
+    # -------- PHOTOS --------
     if message.photo:
         kind = "photo"
         try:
@@ -174,9 +177,9 @@ async def getimage(client: Client, message):
             logger.error("Failed to download photo: %s", e)
             return
 
-    # ---------------- STICKERS ----------------
+    # -------- STICKERS --------
     elif message.sticker:
-        # video sticker (webm) -> treat like video
+        # Video sticker (webm) -> treat like video
         if message.sticker.is_video or message.sticker.mime_type == "video/webm":
             kind = "video"
             try:
@@ -185,15 +188,15 @@ async def getimage(client: Client, message):
                 logger.error("Failed to download video sticker: %s", e)
                 return
 
-            # handle like video below (frames etc.)
-        # animated .tgs sticker -> NOT supported by PIL/OpenCV
+        # Animated .tgs sticker -> NOT supported by PIL/OpenCV, skip safely
         elif message.sticker.is_animated and not message.sticker.is_video:
             logger.info(
                 "Skipping animated .tgs sticker (%s); not supported for NSFW scan yet.",
                 message.sticker.file_unique_id,
             )
             return
-        # static sticker (webp/png)
+
+        # Static sticker (webp/png)
         else:
             kind = "sticker"
             try:
@@ -202,7 +205,7 @@ async def getimage(client: Client, message):
                 logger.error("Failed to download static sticker: %s", e)
                 return
 
-    # ---------------- ANIMATIONS (GIF, MPEG4) ----------------
+    # -------- ANIMATIONS (GIF, MPEG4) --------
     elif message.animation:
         kind = "video"
         try:
@@ -211,7 +214,7 @@ async def getimage(client: Client, message):
             logger.error("Failed to download animation: %s", e)
             return
 
-    # ---------------- VIDEOS ----------------
+    # -------- VIDEOS --------
     elif message.video:
         kind = "video"
         try:
@@ -220,8 +223,13 @@ async def getimage(client: Client, message):
             logger.error("Failed to download video: %s", e)
             return
 
-    # ---------------- DOCUMENT IMAGES ----------------
-    elif message.document and message.document.mime_type.startswith("image/"):
+    # -------- DOCUMENT IMAGES --------
+    elif message.document:
+        # Only care about documents that are images
+        mime = (message.document.mime_type or "").lower()
+        if not mime.startswith("image/"):
+            return  # ignore non-image docs
+
         kind = "photo"
         try:
             file_path = await message.download()
@@ -233,13 +241,12 @@ async def getimage(client: Client, message):
         # Not a type we care about
         return
 
-    # ---------------- FILE EXISTENCE CHECK ----------------
+    # -------- CHECK FILE EXISTS --------
     if not file_path or not os.path.exists(file_path):
         logger.error("Downloaded file does not exist: %s", file_path)
         return
 
-    # ---------------- PROCESS IMAGES ----------------
-    # For photos/static stickers/image docs: just classify the one image
+    # -------- PROCESS STATIC IMAGE TYPES --------
     if kind in ("photo", "sticker"):
         try:
             img = Image.open(file_path).convert("RGB")
@@ -248,40 +255,42 @@ async def getimage(client: Client, message):
             return
 
         nsfw_flag = is_nsfw_image(img, kind)
-        await handle_nsfw_result(client, message, nsfw_flag)
 
-    # ---------------- PROCESS VIDEO-LIKE MEDIA ----------------
+        if nsfw_flag:
+            await delete_nsfw_message(message)
+
+    # -------- PROCESS VIDEO-LIKE MEDIA --------
     elif kind == "video":
         frame_paths = capture_frames(file_path, max_frames=8)
         if not frame_paths:
             logger.error("No frames captured from video: %s", file_path)
-            return
+        else:
+            nsfw_flag = False
 
-        nsfw_flag = False
+            for fp in frame_paths:
+                if not os.path.exists(fp):
+                    continue
+                try:
+                    img = Image.open(fp).convert("RGB")
+                except Exception as e:
+                    logger.error("Failed to open frame %s: %s", fp, e)
+                    continue
 
-        for fp in frame_paths:
-            if not os.path.exists(fp):
-                continue
-            try:
-                img = Image.open(fp).convert("RGB")
-            except Exception as e:
-                logger.error("Failed to open frame %s: %s", fp, e)
-                continue
+                if is_nsfw_image(img, "video"):
+                    nsfw_flag = True
+                    break
 
-            if is_nsfw_image(img, "video"):
-                nsfw_flag = True
-                break
+            if nsfw_flag:
+                await delete_nsfw_message(message)
 
-        await handle_nsfw_result(client, message, nsfw_flag)
+            # cleanup extracted frames
+            for fp in frame_paths:
+                try:
+                    os.remove(fp)
+                except OSError:
+                    pass
 
-        # cleanup extracted frames
-        for fp in frame_paths:
-            try:
-                os.remove(fp)
-            except OSError:
-                pass
-
-    # ---------------- CLEANUP ORIGINAL FILE ----------------
+    # -------- CLEANUP ORIGINAL FILE --------
     try:
         os.remove(file_path)
     except OSError:
