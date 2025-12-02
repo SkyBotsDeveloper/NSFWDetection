@@ -49,16 +49,18 @@ async def getimage(client, event):
     if event.photo:
         file_id = event.photo.file_id
 
-        # Skip if we already know it's NSFW
+        # Skip heavy model if we already know it's NSFW
         if await is_nsfw(file_id):
             await send_msg(event)
             return
 
         try:
-            # download_media returns the full file path
             file_path = await client.download_media(event.photo)
         except Exception as e:
             logger.error("Failed to download image. Error: %s", e)
+            # Can't scan => be safe and treat as NSFW
+            await add_nsfw(file_id)
+            await send_msg(event)
             return
 
     # Stickers
@@ -75,6 +77,9 @@ async def getimage(client, event):
                 file_path = await client.download_media(event.sticker)
             except Exception as e:
                 logger.error("Failed to download animated sticker. Error: %s", e)
+                # If we can't even download it, be safe and treat it as NSFW
+                await add_nsfw(file_id)
+                await send_msg(event)
                 return
 
             # Handle like a video and then stop
@@ -87,6 +92,8 @@ async def getimage(client, event):
                 file_path = await client.download_media(event.sticker)
             except Exception as e:
                 logger.error("Failed to download sticker. Error: %s", e)
+                await add_nsfw(file_id)
+                await send_msg(event)
                 return
 
     # GIF / animation
@@ -101,6 +108,8 @@ async def getimage(client, event):
             file_path = await client.download_media(event.animation)
         except Exception as e:
             logger.error("Failed to download GIF. Error: %s", e)
+            await add_nsfw(file_id)
+            await send_msg(event)
             return
 
         await videoShit(event, file_path, file_id)
@@ -118,6 +127,8 @@ async def getimage(client, event):
             file_path = await client.download_media(event.video)
         except Exception as e:
             logger.error("Failed to download video. Error: %s", e)
+            await add_nsfw(file_id)
+            await send_msg(event)
             return
 
         await videoShit(event, file_path, file_id)
@@ -130,12 +141,16 @@ async def getimage(client, event):
     # From here on, we expect an image file at file_path
     if not file_path or not os.path.exists(file_path):
         logger.error("Downloaded image file does not exist: %s", file_path)
+        await add_nsfw(file_id)
+        await send_msg(event)
         return
 
     try:
         img = Image.open(file_path).convert("RGB")
     except Exception as e:
         logger.error("Failed to open image %s: %s", file_path, e)
+        await add_nsfw(file_id)
+        await send_msg(event)
         return
 
     # Run NSFW model
@@ -185,11 +200,13 @@ async def send_msg(event):
     In groups: delete the message, then send a warning (rate-limited).
     In private: reply with a simple notice.
 
-    Also tracks how many NSFW messages a user sent recently.
+    Also tracks how many NSFW messages a user sent recently, and clearly
+    tells admins who is spamming.
     """
 
     chat_id = event.chat.id
-    user_id = event.from_user.id if event.from_user else None
+    user = event.from_user
+    user_id = user.id if user else None
     now = time.time()
 
     # ---- update per-user NSFW counter ----
@@ -198,14 +215,14 @@ async def send_msg(event):
         data = user_nsfw_count[key]
 
         # If outside the window, reset
-        if now - data["first_ts"] > MAX_VIOLATIONS_WINDOW or data["first_ts"] == 0:
+        if data["first_ts"] == 0 or now - data["first_ts"] > MAX_VIOLATIONS_WINDOW:
             data["first_ts"] = now
             data["count"] = 1
         else:
             data["count"] += 1
 
-    # Always try to delete the offending message in groups
-    if event.chat.type == ChatType.SUPERGROUP:
+    # Always try to delete the offending message in groups & supergroups
+    if event.chat.type in (ChatType.SUPERGROUP, ChatType.GROUP):
         try:
             await event.delete()
         except Exception:
@@ -214,18 +231,26 @@ async def send_msg(event):
         # Rate-limit warning messages to avoid spam in the group
         last_warning = nsfw_warning_cache.get(chat_id, 0)
         if now - last_warning >= WARNING_COOLDOWN:
-            base_text = "NSFW content detected and removed."
+            base_text = "🚫 NSFW content detected and removed."
 
-            # If user is repeatedly sending NSFW content, mention it once in a while
+            # If user is repeatedly sending NSFW content, mention them clearly
             extra_text = ""
             if user_id is not None:
                 data = user_nsfw_count[(chat_id, user_id)]
+
+                # Build a mention so admins see exactly who it is
+                if hasattr(user, "mention") and user.mention:
+                    user_mention = user.mention
+                elif user.username:
+                    user_mention = f"@{user.username}"
+                else:
+                    user_mention = user.first_name or "this user"
+
                 if data["count"] >= MAX_VIOLATIONS:
-                    # Basic extra warning about spammer
-                    name = event.from_user.first_name if event.from_user else "A user"
                     extra_text = (
-                        f"\n{name} has sent {data['count']} NSFW messages "
-                        f"in the last few minutes. Please consider taking action."
+                        f"\n⚠️ Admins, please check {user_mention}: "
+                        f"they have sent {data['count']} NSFW messages "
+                        f"in the last few minutes."
                     )
 
             try:
@@ -282,6 +307,7 @@ async def videoShit(event, video_path, file_id):
     - Take screenshots every 10 seconds.
     - Run NSFW model on each frame.
     - If any frame is NSFW, treat the whole file as NSFW.
+    - If we can't process frames at all, be safe and treat as NSFW.
     """
 
     # Double-check cache
@@ -294,6 +320,14 @@ async def videoShit(event, video_path, file_id):
 
     if not image_names:
         logger.error("No frames captured from video: %s", video_path)
+        # We couldn't scan it, so treat as NSFW to be safe
+        await add_nsfw(file_id)
+        await send_msg(event)
+        # Clean up video file
+        try:
+            os.remove(video_path)
+        except OSError:
+            pass
         return
 
     is_video_nsfw = False
