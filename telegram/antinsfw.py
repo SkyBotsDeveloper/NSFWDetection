@@ -6,6 +6,7 @@ from collections import defaultdict
 
 from PIL import Image
 import torch
+import clip  # CLIP fallback model
 from telegram import client
 from pyrogram import filters
 from telegram.db import is_nsfw, add_chat, add_user, add_nsfw, remove_nsfw
@@ -13,25 +14,55 @@ from transformers import AutoModelForImageClassification, ViTImageProcessor
 from pyrogram.enums import ChatType
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-# Load model once, at startup
-model = AutoModelForImageClassification.from_pretrained("Falconsai/nsfw_image_detection")
-processor = ViTImageProcessor.from_pretrained("Falconsai/nsfw_image_detection")
+# ---------------------- DEVICE SETUP ----------------------
 
 logger = logging.getLogger(__name__)
 
-# -------- anti-spam state (in-memory) --------
+device = "cuda" if torch.cuda.is_available() else "cpu"
+logger.info(f"Using device: {device}")
 
-# Last time we sent a "NSFW detected" warning per chat
+# ---------------------- MAIN NSFW MODEL ----------------------
+
+model = AutoModelForImageClassification.from_pretrained(
+    "Falconsai/nsfw_image_detection"
+).to(device)
+processor = ViTImageProcessor.from_pretrained("Falconsai/nsfw_image_detection")
+
+# ---------------------- CLIP FALLBACK MODEL ----------------------
+
+clip_model, clip_preprocess = clip.load("ViT-L/14", device=device)
+clip_model.eval()
+
+CLIP_NSFWTEXT = [
+    "a pornographic image",
+    "a nude person",
+    "a naked woman",
+    "a naked man",
+    "sexual content",
+    "explicit content",
+    "adult content",
+    "nsfw image",
+]
+
+# Pre-tokenize text once and move to device
+CLIP_TEXT_TOKENS = clip.tokenize(CLIP_NSFWTEXT).to(device)
+
+# Threshold for CLIP NSFW probability (tune if needed)
+CLIP_THRESHOLD = 0.35
+
+# ---------------------- ANTI-SPAM STATE ----------------------
+
 nsfw_warning_cache = {}  # chat_id -> last_warning_timestamp
 
-# Track how many NSFW messages each user sent in each chat recently
 # (chat_id, user_id) -> {"count": int, "first_ts": float}
 user_nsfw_count = defaultdict(lambda: {"count": 0, "first_ts": 0.0})
 
-# Config for spam handling
 MAX_VIOLATIONS_WINDOW = 300  # seconds = 5 minutes
-MAX_VIOLATIONS = 5          # how many NSFW msgs in that window to be considered spammy
-WARNING_COOLDOWN = 10       # seconds between warning messages in the same chat
+MAX_VIOLATIONS = 5           # how many NSFW msgs in that window to be considered spammy
+WARNING_COOLDOWN = 10        # seconds between warning messages in the same chat
+
+
+# ---------------------- HELPERS ----------------------
 
 
 def get_media_key_for_db(message):
@@ -48,6 +79,66 @@ def get_media_key_for_db(message):
     if message.video:
         return message.video.file_unique_id
     return None
+
+
+def run_main_model(img: Image.Image) -> bool:
+    """
+    Run Falconsai model on a PIL image.
+    Returns True if NSFW, False otherwise.
+    """
+    with torch.no_grad():
+        inputs = processor(images=img, return_tensors="pt")
+        # Move tensors to device
+        for k in inputs:
+            inputs[k] = inputs[k].to(device)
+
+        outputs = model(**inputs)
+        logits = outputs.logits
+
+    predicted_label = logits.argmax(-1).item()
+    return predicted_label == 1  # 1 == nsfw for this model
+
+
+def fallback_clip_detect(img: Image.Image) -> bool:
+    """
+    Uses CLIP to judge whether the image is NSFW.
+    Returns True if NSFW, else False.
+    """
+    try:
+        image = clip_preprocess(img).unsqueeze(0).to(device)
+
+        with torch.no_grad():
+            logits_per_image, _ = clip_model(image, CLIP_TEXT_TOKENS)
+            probs = logits_per_image.softmax(dim=-1)
+
+        if probs.max().item() > CLIP_THRESHOLD:
+            return True
+
+        return False
+
+    except Exception as e:
+        logger.error(f"CLIP fallback failed: {e}")
+        return False
+
+
+def is_nsfw_image(img: Image.Image) -> bool:
+    """
+    Combined NSFW decision:
+    1) main model
+    2) if safe, fallback CLIP
+    """
+    # Main model
+    if run_main_model(img):
+        return True
+
+    # Fallback
+    if fallback_clip_detect(img):
+        return True
+
+    return False
+
+
+# ---------------------- MAIN HANDLER ----------------------
 
 
 @client.on_message(filters.photo | filters.sticker | filters.animation | filters.video)
@@ -80,26 +171,34 @@ async def getimage(client, event):
 
     # -------- STICKER --------
     elif event.sticker:
-        # Animated / video sticker
-        if event.sticker.mime_type == "video/webm":
+        # Video sticker (webm) -> treat like video
+        if event.sticker.is_video or event.sticker.mime_type == "video/webm":
             try:
                 file_path = await client.download_media(event.sticker)
             except Exception as e:
-                logger.error("Failed to download animated sticker. Error: %s", e)
+                logger.error("Failed to download video sticker. Error: %s", e)
                 # Can't scan -> ignore (might miss NSFW, but no false delete)
                 return
 
             await videoShit(event, file_path, nsfw_key)
             return
 
-        # Static sticker (treated like an image)
-        else:
-            try:
-                file_path = await client.download_media(event.sticker)
-            except Exception as e:
-                logger.error("Failed to download sticker. Error: %s", e)
-                # Can't scan -> ignore
-                return
+        # Animated .tgs sticker (vector format) -> NOT supported by Pillow
+        if event.sticker.is_animated and not event.sticker.is_video:
+            logger.info(
+                "Skipping animated .tgs sticker (%s); NSFW scan not supported for this format yet.",
+                event.sticker.file_unique_id,
+            )
+            # We just ignore it. No delete, no DB mark, no error spam.
+            return
+
+        # Static sticker (webp/png) -> treat like an image
+        try:
+            file_path = await client.download_media(event.sticker)
+        except Exception as e:
+            logger.error("Failed to download static sticker. Error: %s", e)
+            # Can't scan -> ignore
+            return
 
     # -------- GIF / ANIMATION --------
     elif event.animation:
@@ -143,16 +242,10 @@ async def getimage(client, event):
         # Can't scan -> ignore
         return
 
-    # Run NSFW model
-    with torch.no_grad():
-        inputs = processor(images=img, return_tensors="pt")
-        outputs = model(**inputs)
-        logits = outputs.logits
+    # Combined NSFW decision (main model + CLIP fallback)
+    detected_nsfw = is_nsfw_image(img)
 
-    predicted_label = logits.argmax(-1).item()
-
-    # 1 means nsfw for this model
-    if predicted_label:
+    if detected_nsfw:
         await add_nsfw(nsfw_key)   # cache by unique id
         await send_msg(event)      # delete + warn (with anti-spam logic)
     else:
@@ -163,6 +256,9 @@ async def getimage(client, event):
         os.remove(file_path)
     except OSError:
         pass
+
+
+# ---------------------- START COMMAND ----------------------
 
 
 @client.on_message(filters.command("start"))
@@ -182,6 +278,9 @@ async def start(_, event):
         await add_user(event.from_user.id, event.from_user.username)
     elif event.from_user:
         await add_user(event.from_user.id, "None")
+
+
+# ---------------------- SEND MESSAGE / ANTI-SPAM ----------------------
 
 
 async def send_msg(event):
@@ -228,7 +327,6 @@ async def send_msg(event):
             if user_id is not None:
                 data = user_nsfw_count[(chat_id, user_id)]
 
-                # Build a mention so admins see exactly who it is
                 if getattr(user, "username", None):
                     user_mention = f"@{user.username}"
                 else:
@@ -254,6 +352,9 @@ async def send_msg(event):
     else:
         # Private chat: just reply, no spam problem here
         await event.reply("NSFW Image.")
+
+
+# ---------------------- VIDEO / GIF / VIDEO STICKER SUPPORT ----------------------
 
 
 def capture_screenshot(path, max_frames=8):
@@ -282,7 +383,7 @@ def capture_screenshot(path, max_frames=8):
             idx += 1
             success, frame = vidObj.read()
     else:
-        # Fallback: old-style capturing every ~10 seconds
+        # Fallback: capture every ~10 seconds
         fps = vidObj.get(cv2.CAP_PROP_FPS)
         if fps <= 0:
             fps = 25
@@ -306,7 +407,7 @@ async def videoShit(event, video_path, nsfw_key):
     """
     Process video/gif/animated sticker:
     - Take multiple screenshots across the video.
-    - Run NSFW model on each frame.
+    - Run NSFW model + CLIP on each frame.
     - If any frame is NSFW, treat the whole file as NSFW.
     - If we can't process frames at all, we DO NOT delete. (no false positives)
     """
@@ -340,14 +441,7 @@ async def videoShit(event, video_path, nsfw_key):
             logger.error("Failed to open frame %s: %s", img_path, e)
             continue
 
-        with torch.no_grad():
-            inputs = processor(images=img, return_tensors="pt")
-            outputs = model(**inputs)
-            logits = outputs.logits
-
-        predicted_label = logits.argmax(-1).item()
-
-        if predicted_label:
+        if is_nsfw_image(img):
             is_video_nsfw = True
             break
 
