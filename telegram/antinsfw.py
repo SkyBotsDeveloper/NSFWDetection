@@ -6,8 +6,6 @@ from collections import defaultdict
 import cv2
 from PIL import Image
 import torch
-import timm
-import clip  # CLIP fallback model
 
 from telegram import client
 from pyrogram import filters
@@ -15,67 +13,36 @@ from pyrogram.enums import ChatType
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from telegram.db import is_nsfw, add_chat, add_user, add_nsfw, remove_nsfw
+from transformers import AutoModelForImageClassification, ViTImageProcessor
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------
 # DEVICE SETUP
 # ---------------------------------------------------------
 
-logger = logging.getLogger(__name__)
 device = "cuda" if torch.cuda.is_available() else "cpu"
 logger.info(f"[NSFW BOT] Using device: {device}")
 
 # ---------------------------------------------------------
-# MAIN NSFW MODEL: Marqo/nsfw-image-detection-384
+# MAIN NSFW MODEL: Falconsai/nsfw_image_detection
 # ---------------------------------------------------------
-# Model card: https://huggingface.co/Marqo/nsfw-image-detection-384
 
-logger.info("[NSFW BOT] Loading Marqo/nsfw-image-detection-384...")
-main_model = timm.create_model("hf_hub:Marqo/nsfw-image-detection-384", pretrained=True)
-main_model = main_model.to(device).eval()
+logger.info("[NSFW BOT] Loading Falconsai/nsfw_image_detection...")
+model = AutoModelForImageClassification.from_pretrained(
+    "Falconsai/nsfw_image_detection"
+).to(device)
+processor = ViTImageProcessor.from_pretrained("Falconsai/nsfw_image_detection")
 
-# Build transforms from model's config
-data_config = timm.data.resolve_model_data_config(main_model)
-main_transforms = timm.data.create_transform(**data_config, is_training=False)
+# We assume index 1 in logits is NSFW (this matches how we used it before)
+NSFW_INDEX = 1
 
-# Try to get label names (should be something like ['sfw', 'nsfw'])
-MAIN_CLASS_NAMES = main_model.pretrained_cfg.get("label_names", None)
-if MAIN_CLASS_NAMES:
-    logger.info(f"[NSFW BOT] Main model labels: {MAIN_CLASS_NAMES}")
-    NSFW_INDEX_MAIN = MAIN_CLASS_NAMES.index("nsfw") if "nsfw" in MAIN_CLASS_NAMES else 1
-else:
-    logger.warning("[NSFW BOT] No label_names in pretrained_cfg; assuming index 1 == NSFW")
-    NSFW_INDEX_MAIN = 1
-
-# Tune this to control strictness of main model
-MAIN_NSFV_THRESHOLD = 0.5  # probability above which we consider it NSFW
-
-
-# ---------------------------------------------------------
-# CLIP FALLBACK MODEL
-# ---------------------------------------------------------
-# CLIP gives better coverage for weird / borderline content.
-
-logger.info("[NSFW BOT] Loading CLIP ViT-L/14 as fallback...")
-clip_model, clip_preprocess = clip.load("ViT-L/14", device=device)
-clip_model.eval()
-
-CLIP_NSFWTEXT = [
-    "a pornographic image",
-    "a nude person",
-    "a naked woman",
-    "a naked man",
-    "sexual content",
-    "explicit content",
-    "adult content",
-    "nsfw image",
-    "hentai",
-    "anime porn",
-]
-
-CLIP_TEXT_TOKENS = clip.tokenize(CLIP_NSFWTEXT).to(device)
-
-# Tune this too
-CLIP_THRESHOLD = 0.35  # lower => more aggressive, higher => less aggressive
+# Conservative thresholds:
+# Lower threshold => more aggressive (more deletions)
+# Higher threshold => more relaxed (fewer deletions)
+PHOTO_THRESHOLD = 0.70    # photos, frames from video
+VIDEO_THRESHOLD = 0.70    # same as photo
+STICKER_THRESHOLD = 0.90  # stickers need VERY high NSFW probability to delete
 
 
 # ---------------------------------------------------------
@@ -83,12 +50,10 @@ CLIP_THRESHOLD = 0.35  # lower => more aggressive, higher => less aggressive
 # ---------------------------------------------------------
 
 # Last time we sent a "NSFW detected" warning per chat
-nsfw_warning_cache: dict[int, float] = {}
+nsfw_warning_cache = {}  # chat_id -> last_warning_timestamp
 
 # (chat_id, user_id) -> {"count": int, "first_ts": float}
-user_nsfw_count: dict[tuple[int, int], dict[str, float | int]] = defaultdict(
-    lambda: {"count": 0, "first_ts": 0.0}
-)
+user_nsfw_count = defaultdict(lambda: {"count": 0, "first_ts": 0.0})
 
 MAX_VIOLATIONS_WINDOW = 300  # seconds = 5 minutes
 MAX_VIOLATIONS = 5           # how many NSFW msgs in that window to be considered spammy
@@ -96,11 +61,11 @@ WARNING_COOLDOWN = 10        # seconds between warning messages in the same chat
 
 
 # ---------------------------------------------------------
-# HELPER FUNCTIONS
+# HELPERS
 # ---------------------------------------------------------
 
 
-def get_media_key_for_db(message) -> str | None:
+def get_media_key_for_db(message):
     """
     Use Telegram's file_unique_id as the key for NSFW cache.
     Same sticker / photo / video => same unique id, so reuse NSFW decision.
@@ -116,61 +81,44 @@ def get_media_key_for_db(message) -> str | None:
     return None
 
 
-def run_main_model_on_image(img: Image.Image) -> float:
+def classify_nsfw_probability(img: Image.Image) -> float:
     """
-    Run Marqo/nsfw-image-detection-384 on a PIL image.
-    Returns the NSFW probability (0.0 - 1.0).
+    Run Falconsai model on a PIL image.
+    Returns NSFW probability (0.0 - 1.0).
     """
     with torch.no_grad():
-        x = main_transforms(img).unsqueeze(0).to(device)
-        output = main_model(x).softmax(dim=-1)[0]  # shape [2]
-        nsfw_prob = float(output[NSFW_INDEX_MAIN].item())
+        inputs = processor(images=img, return_tensors="pt")
+        # move to device
+        for k in inputs:
+            inputs[k] = inputs[k].to(device)
+
+        outputs = model(**inputs)
+        logits = outputs.logits[0]
+        probs = torch.softmax(logits, dim=-1)
+        nsfw_prob = float(probs[NSFW_INDEX].item())
         return nsfw_prob
 
 
-def fallback_clip_detect(img: Image.Image) -> float:
+def is_nsfw_image(img: Image.Image, content_type: str) -> bool:
     """
-    Run CLIP zero-shot NSFW check.
-    Returns "NSFW score" (0.0 - 1.0) as max softmax over NSFW prompts.
+    Decide NSFW based on content type:
+    - 'photo' or 'video': PHOTO_THRESHOLD / VIDEO_THRESHOLD
+    - 'sticker': STICKER_THRESHOLD (very conservative)
     """
-    try:
-        image = clip_preprocess(img).unsqueeze(0).to(device)
+    nsfw_prob = classify_nsfw_probability(img)
 
-        with torch.no_grad():
-            logits_per_image, _ = clip_model(image, CLIP_TEXT_TOKENS)
-            probs = logits_per_image.softmax(dim=-1)[0]
-            return float(probs.max().item())
-
-    except Exception as e:
-        logger.error(f"[NSFW BOT] CLIP fallback failed: {e}")
-        return 0.0
-
-
-def is_nsfw_image(img: Image.Image) -> bool:
-    """
-    Combined NSFW decision:
-    1) Main model (Marqo)
-    2) If below main threshold, check CLIP as fallback
-    """
-    # 1) Main model
-    nsfw_prob_main = run_main_model_on_image(img)
-
-    if nsfw_prob_main >= MAIN_NSFV_THRESHOLD:
-        logger.debug(f"[NSFW BOT] Main model NSFW prob={nsfw_prob_main:.3f} -> NSFW")
-        return True
-
-    # 2) Fallback CLIP if main model says "safe-ish"
-    clip_score = fallback_clip_detect(img)
-    if clip_score >= CLIP_THRESHOLD:
-        logger.debug(
-            f"[NSFW BOT] CLIP fallback score={clip_score:.3f} >= {CLIP_THRESHOLD:.2f} -> NSFW"
-        )
-        return True
+    if content_type == "sticker":
+        threshold = STICKER_THRESHOLD
+    elif content_type == "video":
+        threshold = VIDEO_THRESHOLD
+    else:
+        threshold = PHOTO_THRESHOLD
 
     logger.debug(
-        f"[NSFW BOT] Both main (prob={nsfw_prob_main:.3f}) and CLIP (score={clip_score:.3f}) say SAFE"
+        f"[NSFW BOT] Content={content_type}, NSFW prob={nsfw_prob:.3f}, threshold={threshold:.3f}"
     )
-    return False
+
+    return nsfw_prob >= threshold
 
 
 # ---------------------------------------------------------
@@ -186,7 +134,7 @@ async def getimage(client, event):
     - Animations, video stickers and videos are treated as videos and passed to videoShit().
     """
 
-    file_path: str | None = None
+    file_path = None
     nsfw_key = get_media_key_for_db(event)
 
     if nsfw_key is None:
@@ -197,8 +145,11 @@ async def getimage(client, event):
         await send_msg(event)
         return
 
+    content_type = "photo"
+
     # -------- PHOTO --------
     if event.photo:
+        content_type = "photo"
         try:
             file_path = await client.download_media(event.photo)
         except Exception as e:
@@ -229,7 +180,8 @@ async def getimage(client, event):
             # We just ignore it. No delete, no DB mark, no error spam.
             return
 
-        # Static sticker (webp/png) -> treat like an image
+        # Static sticker (webp/png) -> treat like an image, but with higher threshold
+        content_type = "sticker"
         try:
             file_path = await client.download_media(event.sticker)
         except Exception as e:
@@ -239,6 +191,7 @@ async def getimage(client, event):
 
     # -------- GIF / ANIMATION --------
     elif event.animation:
+        content_type = "video"
         try:
             file_path = await client.download_media(event.animation)
         except Exception as e:
@@ -251,6 +204,7 @@ async def getimage(client, event):
 
     # -------- VIDEO --------
     elif event.video:
+        content_type = "video"
         try:
             file_path = await client.download_media(event.video)
         except Exception as e:
@@ -279,7 +233,7 @@ async def getimage(client, event):
         # Can't scan -> ignore
         return
 
-    detected_nsfw = is_nsfw_image(img)
+    detected_nsfw = is_nsfw_image(img, content_type)
 
     if detected_nsfw:
         await add_nsfw(nsfw_key)   # cache by unique id
@@ -399,14 +353,14 @@ async def send_msg(event):
 # ---------------------------------------------------------
 
 
-def capture_screenshot(path: str, max_frames: int = 8) -> list[str]:
+def capture_screenshot(path, max_frames=8):
     """
     Capture up to max_frames evenly spaced frames from the video.
     Returns a list of image file paths.
     More robust than "every 10 seconds", works better for short webm stickers.
     """
     vidObj = cv2.VideoCapture(path)
-    saved_image_names: list[str] = []
+    saved_image_names = []
 
     total_frames = int(vidObj.get(cv2.CAP_PROP_FRAME_COUNT))
 
@@ -445,11 +399,11 @@ def capture_screenshot(path: str, max_frames: int = 8) -> list[str]:
     return saved_image_names
 
 
-async def videoShit(event, video_path: str, nsfw_key: str):
+async def videoShit(event, video_path, nsfw_key):
     """
     Process video/gif/animated video sticker:
     - Take multiple screenshots across the video.
-    - Run NSFW model + CLIP on each frame.
+    - Run NSFW model on each frame (video threshold).
     - If any frame is NSFW, treat the whole file as NSFW.
     - If we can't process frames at all, we DO NOT delete. (no false positives)
     """
@@ -483,7 +437,7 @@ async def videoShit(event, video_path: str, nsfw_key: str):
             logger.error("[NSFW BOT] Failed to open frame %s: %s", img_path, e)
             continue
 
-        if is_nsfw_image(img):
+        if is_nsfw_image(img, "video"):
             is_video_nsfw = True
             break
 
