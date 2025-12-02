@@ -34,6 +34,22 @@ MAX_VIOLATIONS = 5          # how many NSFW msgs in that window to be considered
 WARNING_COOLDOWN = 10       # seconds between warning messages in the same chat
 
 
+def get_media_key_for_db(message):
+    """
+    Use Telegram's file_unique_id as the key for NSFW cache.
+    Same sticker / photo / video => same unique id, so reuse NSFW decision.
+    """
+    if message.photo:
+        return message.photo.file_unique_id
+    if message.sticker:
+        return message.sticker.file_unique_id
+    if message.animation:
+        return message.animation.file_unique_id
+    if message.video:
+        return message.video.file_unique_id
+    return None
+
+
 @client.on_message(filters.photo | filters.sticker | filters.animation | filters.video)
 async def getimage(client, event):
     """
@@ -43,17 +59,18 @@ async def getimage(client, event):
     """
 
     file_path = None
-    file_id = None
+    nsfw_key = get_media_key_for_db(event)
 
-    # Photo (normal images)
+    if nsfw_key is None:
+        return
+
+    # Fast path: if DB already knows this media (by unique id) is NSFW, delete immediately
+    if await is_nsfw(nsfw_key):
+        await send_msg(event)
+        return
+
+    # -------- PHOTO --------
     if event.photo:
-        file_id = event.photo.file_id
-
-        # Fast path: if DB already knows this file_id is NSFW, delete immediately
-        if await is_nsfw(file_id):
-            await send_msg(event)
-            return
-
         try:
             file_path = await client.download_media(event.photo)
         except Exception as e:
@@ -61,25 +78,18 @@ async def getimage(client, event):
             # Can't scan -> do nothing, don't delete, don't mark NSFW
             return
 
-    # Stickers
+    # -------- STICKER --------
     elif event.sticker:
-        file_id = event.sticker.file_id
-
-        if await is_nsfw(file_id):
-            await send_msg(event)
-            return
-
-        # Animated/video sticker
+        # Animated / video sticker
         if event.sticker.mime_type == "video/webm":
             try:
                 file_path = await client.download_media(event.sticker)
             except Exception as e:
                 logger.error("Failed to download animated sticker. Error: %s", e)
-                # Can't scan -> ignore
+                # Can't scan -> ignore (might miss NSFW, but no false delete)
                 return
 
-            # Handle like a video and then stop
-            await videoShit(event, file_path, file_id)
+            await videoShit(event, file_path, nsfw_key)
             return
 
         # Static sticker (treated like an image)
@@ -91,14 +101,8 @@ async def getimage(client, event):
                 # Can't scan -> ignore
                 return
 
-    # GIF / animation
+    # -------- GIF / ANIMATION --------
     elif event.animation:
-        file_id = event.animation.file_id
-
-        if await is_nsfw(file_id):
-            await send_msg(event)
-            return
-
         try:
             file_path = await client.download_media(event.animation)
         except Exception as e:
@@ -106,17 +110,11 @@ async def getimage(client, event):
             # Can't scan -> ignore
             return
 
-        await videoShit(event, file_path, file_id)
+        await videoShit(event, file_path, nsfw_key)
         return
 
-    # Normal video
+    # -------- VIDEO --------
     elif event.video:
-        file_id = event.video.file_id
-
-        if await is_nsfw(file_id):
-            await send_msg(event)
-            return
-
         try:
             file_path = await client.download_media(event.video)
         except Exception as e:
@@ -124,17 +122,18 @@ async def getimage(client, event):
             # Can't scan -> ignore
             return
 
-        await videoShit(event, file_path, file_id)
+        await videoShit(event, file_path, nsfw_key)
         return
 
     else:
         # Not something we care about
         return
 
-    # From here on, we expect an image file at file_path
+    # ----- IMAGE PROCESSING (photos + static stickers) -----
+
     if not file_path or not os.path.exists(file_path):
         logger.error("Downloaded image file does not exist: %s", file_path)
-        # Can't scan -> ignore (do NOT mark/delete)
+        # Can't scan -> ignore
         return
 
     try:
@@ -154,10 +153,10 @@ async def getimage(client, event):
 
     # 1 means nsfw for this model
     if predicted_label:
-        await add_nsfw(file_id)   # store in DB so future sends are instant
-        await send_msg(event)     # delete + warn (with anti-spam logic)
+        await add_nsfw(nsfw_key)   # cache by unique id
+        await send_msg(event)      # delete + warn (with anti-spam logic)
     else:
-        await remove_nsfw(file_id)
+        await remove_nsfw(nsfw_key)
 
     # Optional: delete downloaded image to save space
     try:
@@ -230,9 +229,7 @@ async def send_msg(event):
                 data = user_nsfw_count[(chat_id, user_id)]
 
                 # Build a mention so admins see exactly who it is
-                if hasattr(user, "mention") and callable(getattr(user, "mention", None)):
-                    user_mention = user.mention
-                elif getattr(user, "username", None):
+                if getattr(user, "username", None):
                     user_mention = f"@{user.username}"
                 else:
                     user_mention = user.first_name or "this user"
@@ -259,50 +256,63 @@ async def send_msg(event):
         await event.reply("NSFW Image.")
 
 
-def capture_screenshot(path):
+def capture_screenshot(path, max_frames=8):
     """
-    Capture one frame every 10 seconds from the video.
+    Capture up to max_frames evenly spaced frames from the video.
     Returns a list of image file paths.
+    More robust than "every 10 seconds", works better for short webm stickers.
     """
     vidObj = cv2.VideoCapture(path)
-    fps = vidObj.get(cv2.CAP_PROP_FPS)
-
-    if fps <= 0:
-        fps = 25  # fallback if FPS can't be read
-
-    frames_to_skip = int(fps * 10)
-
-    count = 0
-    success = True
     saved_image_names = []
 
-    while success:
-        success, image = vidObj.read()
-        if not success:
-            break
+    total_frames = int(vidObj.get(cv2.CAP_PROP_FRAME_COUNT))
 
-        if frames_to_skip > 0 and count % frames_to_skip == 0:
-            image_name = f"frame_{count // frames_to_skip}.png"
-            cv2.imwrite(image_name, image)
-            saved_image_names.append(image_name)
+    if total_frames > 0:
+        # Evenly pick up to max_frames across the whole video
+        step = max(total_frames // max_frames, 1)
+        target_indices = set(i * step for i in range(max_frames) if i * step < total_frames)
 
-        count += 1
+        idx = 0
+        success, frame = vidObj.read()
+        while success:
+            if idx in target_indices:
+                image_name = f"frame_{idx}.png"
+                cv2.imwrite(image_name, frame)
+                saved_image_names.append(image_name)
+            idx += 1
+            success, frame = vidObj.read()
+    else:
+        # Fallback: old-style capturing every ~10 seconds
+        fps = vidObj.get(cv2.CAP_PROP_FPS)
+        if fps <= 0:
+            fps = 25
+        frames_to_skip = int(fps * 10)
+
+        count = 0
+        success, frame = vidObj.read()
+        while success:
+            if frames_to_skip > 0 and count % frames_to_skip == 0:
+                image_name = f"frame_{count}.png"
+                cv2.imwrite(image_name, frame)
+                saved_image_names.append(image_name)
+            count += 1
+            success, frame = vidObj.read()
 
     vidObj.release()
     return saved_image_names
 
 
-async def videoShit(event, video_path, file_id):
+async def videoShit(event, video_path, nsfw_key):
     """
     Process video/gif/animated sticker:
-    - Take screenshots every 10 seconds.
+    - Take multiple screenshots across the video.
     - Run NSFW model on each frame.
     - If any frame is NSFW, treat the whole file as NSFW.
     - If we can't process frames at all, we DO NOT delete. (no false positives)
     """
 
     # Double-check cache
-    if await is_nsfw(file_id):
+    if await is_nsfw(nsfw_key):
         await send_msg(event)
         return
 
@@ -311,7 +321,7 @@ async def videoShit(event, video_path, file_id):
 
     if not image_names:
         logger.error("No frames captured from video: %s", video_path)
-        # Can't scan this video/sticker -> ignore it (may miss NSFW but no false delete)
+        # Can't scan this video/sticker -> ignore (might miss NSFW but no false delete)
         try:
             os.remove(video_path)
         except OSError:
@@ -342,10 +352,10 @@ async def videoShit(event, video_path, file_id):
             break
 
     if is_video_nsfw:
-        await add_nsfw(file_id)
+        await add_nsfw(nsfw_key)
         await send_msg(event)
     else:
-        await remove_nsfw(file_id)
+        await remove_nsfw(nsfw_key)
 
     # Cleanup frames and video file
     for img_path in image_names:
