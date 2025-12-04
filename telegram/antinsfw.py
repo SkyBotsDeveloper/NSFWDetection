@@ -1,297 +1,158 @@
+import cv2
 import os
 import logging
-
-import cv2
 from PIL import Image
 import torch
-
-from telegram import client       # your existing pyrogram.Client instance
+from telegram import client
 from pyrogram import filters
-from pyrogram.enums import ChatType
+from telegram.db import is_nsfw, add_chat, add_user, add_nsfw, remove_nsfw
 from transformers import AutoModelForImageClassification, ViTImageProcessor
+from pyrogram.enums import ChatType
+from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-logger = logging.getLogger(__name__)
+model = AutoModelForImageClassification.from_pretrained("Falconsai/nsfw_image_detection")
+processor = ViTImageProcessor.from_pretrained('Falconsai/nsfw_image_detection')
 
-# ------------------ MODEL SETUP ------------------
+@client.on_message(filters.photo | filters.sticker | filters.animation | filters.video) 
+async def getimage(client, event):
+    if event.photo:
+        file_id = event.photo.file_id
+        if (await is_nsfw(file_id)):
+            await send_msg(event)
+            return
+        try:
+            await client.download_media(event.photo, os.path.join(os.getcwd(), "image.png"))
+        except Exception as e:
+            logging.error(f"Failed to download image. Error: {e}")
+            return
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
-logger.info(f"[NSFW BOT] Using device: {device}")
+    elif event.sticker: 
+        file_id = event.sticker.file_id
+        if (await is_nsfw(file_id)):
+            await send_msg(event)
+            return
+        if event.sticker.mime_type == "video/webm":
+            try:
+                await client.download_media(event.sticker, os.path.join(os.getcwd(), "animated.mp4"))
+            except Exception as e:
+                logging.error(f"Failed to download animated sticker. Error: {e}")
+                return
+            await videoShit(event, "animated.mp4", file_id)
 
-model = AutoModelForImageClassification.from_pretrained(
-    "Falconsai/nsfw_image_detection"
-).to(device)
-processor = ViTImageProcessor.from_pretrained("Falconsai/nsfw_image_detection")
+        else:
+            try:
+                await client.download_media(event.sticker, os.path.join(os.getcwd(), "image.png"))
+            except Exception as e:
+                logging.error(f"Failed to download sticker. Error: {e}")
+                return
+            
+    elif event.animation:
+        file_id = event.animation.file_id
+        if (await is_nsfw(file_id)):
+            await send_msg(event)
+            return
+        try:
+            await client.download_media(event.animation, os.path.join(os.getcwd(), "gif.mp4"))
+        except Exception as e:
+            logging.error(f"Failed to download GIF. Error: {e}")
+            return
+        await videoShit(event, "gif.mp4", file_id)
 
-# We assume index 1 in logits is NSFW (this matches earlier usage)
-NSFW_INDEX = 1
-
-# Thresholds (tune these if needed)
-PHOTO_THRESHOLD = 0.70    # photos, image documents
-VIDEO_THRESHOLD = 0.70    # frames from video / gif / video sticker
-STICKER_THRESHOLD = 0.90  # static stickers only deleted if VERY likely NSFW
-
-
-def classify_nsfw_prob(img: Image.Image) -> float:
-    """
-    Run Falconsai model on a PIL image.
-    Returns NSFW probability (0.0 - 1.0).
-    """
+    elif event.video:
+        file_id = event.video.file_id
+        if (await is_nsfw(file_id)):
+            await send_msg(event)
+            return
+        try:
+            await client.download_media(event.video, os.path.join(os.getcwd(), "video.mp4"))
+        except Exception as e:
+            logging.error(f"Failed to download video. Error: {e}")
+            return
+        await videoShit(event, "video.mp4", file_id)
+    else:
+        return
+    
+    img = Image.open("image.png")
     with torch.no_grad():
         inputs = processor(images=img, return_tensors="pt")
-        for k in inputs:
-            inputs[k] = inputs[k].to(device)
-
         outputs = model(**inputs)
-        logits = outputs.logits[0]
-        probs = torch.softmax(logits, dim=-1)
-        nsfw_prob = float(probs[NSFW_INDEX].item())
-        return nsfw_prob
+        logits = outputs.logits
 
-
-def is_nsfw_image(img: Image.Image, kind: str) -> bool:
-    """
-    Decide NSFW based on kind:
-    - 'photo' or 'document' -> PHOTO_THRESHOLD
-    - 'video'                -> VIDEO_THRESHOLD
-    - 'sticker'              -> STICKER_THRESHOLD (very conservative)
-    """
-    nsfw_prob = classify_nsfw_prob(img)
-
-    if kind == "sticker":
-        threshold = STICKER_THRESHOLD
-    elif kind == "video":
-        threshold = VIDEO_THRESHOLD
+    predicted_label = logits.argmax(-1).item()
+    if predicted_label:
+        await add_nsfw(file_id)
+        await send_msg(event)
     else:
-        threshold = PHOTO_THRESHOLD
-
-    logger.debug(
-        f"[NSFW BOT] kind={kind}, nsfw_prob={nsfw_prob:.3f}, threshold={threshold:.3f}"
-    )
-
-    return nsfw_prob >= threshold
-
-
-def capture_frames(path: str, max_frames: int = 8) -> list[str]:
-    """
-    Capture up to max_frames evenly spaced frames from a video/gif.
-    Returns a list of image file paths.
-    """
-    vid = cv2.VideoCapture(path)
-    saved: list[str] = []
-
-    total_frames = int(vid.get(cv2.CAP_PROP_FRAME_COUNT))
-
-    if total_frames > 0:
-        # Evenly sample frames
-        step = max(total_frames // max_frames, 1)
-        targets = set(i * step for i in range(max_frames) if i * step < total_frames)
-
-        idx = 0
-        success, frame = vid.read()
-        while success:
-            if idx in targets:
-                img_name = f"frame_{idx}.png"
-                cv2.imwrite(img_name, frame)
-                saved.append(img_name)
-            idx += 1
-            success, frame = vid.read()
-    else:
-        # Fallback: every ~10 seconds
-        fps = vid.get(cv2.CAP_PROP_FPS)
-        if fps <= 0:
-            fps = 25
-        frames_to_skip = int(fps * 10)
-
-        count = 0
-        success, frame = vid.read()
-        while success:
-            if frames_to_skip > 0 and count % frames_to_skip == 0:
-                img_name = f"frame_{count}.png"
-                cv2.imwrite(img_name, frame)
-                saved.append(img_name)
-            count += 1
-            success, frame = vid.read()
-
-    vid.release()
-    return saved
-
-
-async def delete_nsfw_message(message):
-    """
-    What happens when we are SURE the content is NSFW.
-    Only deletes NSFW content. No DB, no spam logic.
-    """
-    if message.chat.type in (ChatType.SUPERGROUP, ChatType.GROUP):
-        # In groups, just delete the message and send a simple warning
-        try:
-            await message.delete()
-        except Exception:
-            pass
-        try:
-            await message.chat.send_message("🚫 NSFW content detected and removed.")
-        except Exception:
-            pass
-    else:
-        # In private: just reply
-        try:
-            await message.reply("🚫 NSFW content detected.")
-        except Exception:
-            pass
-
-
-# ------------------ MAIN HANDLER ------------------
-
-
-@client.on_message(
-    filters.incoming
-    & (
-        filters.photo
-        | filters.sticker
-        | filters.animation
-        | filters.video
-        | filters.document
-    )
-)
-async def getimage(client, message):
-    """
-    Handles:
-      - photos
-      - static stickers
-      - video stickers (webm)
-      - animations (GIF / MPEG4)
-      - videos
-      - documents that are images
-
-    Only deletes when detection is confident enough.
-    """
-
-    file_path = None
-    kind = "photo"  # default kind
-
-    # -------- PHOTOS --------
-    if message.photo:
-        kind = "photo"
-        try:
-            file_path = await message.download()
-        except Exception as e:
-            logger.error("Failed to download photo: %s", e)
-            return
-
-    # -------- STICKERS --------
-    elif message.sticker:
-        # Video sticker (webm) -> treat like video
-        if message.sticker.is_video or message.sticker.mime_type == "video/webm":
-            kind = "video"
-            try:
-                file_path = await message.download()
-            except Exception as e:
-                logger.error("Failed to download video sticker: %s", e)
-                return
-
-        # Animated .tgs sticker -> NOT supported by PIL/OpenCV, skip safely
-        elif message.sticker.is_animated and not message.sticker.is_video:
-            logger.info(
-                "Skipping animated .tgs sticker (%s); not supported for NSFW scan yet.",
-                message.sticker.file_unique_id,
-            )
-            return
-
-        # Static sticker (webp/png)
-        else:
-            kind = "sticker"
-            try:
-                file_path = await message.download()
-            except Exception as e:
-                logger.error("Failed to download static sticker: %s", e)
-                return
-
-    # -------- ANIMATIONS (GIF, MPEG4) --------
-    elif message.animation:
-        kind = "video"
-        try:
-            file_path = await message.download()
-        except Exception as e:
-            logger.error("Failed to download animation: %s", e)
-            return
-
-    # -------- VIDEOS --------
-    elif message.video:
-        kind = "video"
-        try:
-            file_path = await message.download()
-        except Exception as e:
-            logger.error("Failed to download video: %s", e)
-            return
-
-    # -------- DOCUMENT IMAGES --------
-    elif message.document:
-        # Only care about documents that are images
-        mime = (message.document.mime_type or "").lower()
-        if not mime.startswith("image/"):
-            return  # ignore non-image docs
-
-        kind = "photo"
-        try:
-            file_path = await message.download()
-        except Exception as e:
-            logger.error("Failed to download image document: %s", e)
-            return
-
-    else:
-        # Not a type we care about
+        await remove_nsfw(file_id)
         return
 
-    # -------- CHECK FILE EXISTS --------
-    if not file_path or not os.path.exists(file_path):
-        logger.error("Downloaded file does not exist: %s", file_path)
-        return
+@client.on_message(filters.command("start"))
+async def start(_, event):
+    buttons = [[InlineKeyboardButton("Support Chat", url="t.me/VivaanSupport"), InlineKeyboardButton("News Channel", url="t.me/VivaanUpdates")]]
+    reply_markup = InlineKeyboardMarkup(buttons)
+    await event.reply_text("Hello, I am a bot that detects NSFW (Not Safe for Work) images. Send me an image to check if it is NSFW or not. In groups, just make me an admin with delete message rights and I will delete all NSFW images sent by anyone.", reply_markup=reply_markup)
+    if event.from_user.username:
+        await add_user(event.from_user.id, event.from_user.username)
+    else:
+        await add_user(event.from_user.id, "None")
 
-    # -------- PROCESS STATIC IMAGE TYPES --------
-    if kind in ("photo", "sticker"):
+
+async def send_msg(event):
+    if event.chat.type == ChatType.SUPERGROUP:
         try:
-            img = Image.open(file_path).convert("RGB")
-        except Exception as e:
-            logger.error("Failed to open image %s: %s", file_path, e)
+            await event.delete()
+        except:
+            pass
+        try:
+            await client.send_message(event.chat.id, "NSFW image detected :)")
+        except:
+            pass
+        await add_chat(event.chat.id)
+    else:
+        await event.reply("NSFW Image.")
+
+
+
+def capture_screenshot(path):
+    vidObj = cv2.VideoCapture(path)
+    fps = vidObj.get(cv2.CAP_PROP_FPS)
+    frames_to_skip = int(fps * 10)
+
+    count = 0
+    success = 1
+    saved_image_names = []
+
+    while success:
+        success, image = vidObj.read()
+        if frames_to_skip > 0 and count % frames_to_skip == 0:
+            image_name = f"image_{count // frames_to_skip}.png"
+            cv2.imwrite(image_name, image)
+            saved_image_names.append(image_name)
+
+        count += 1
+
+    vidObj.release()
+    
+    return saved_image_names
+
+
+async def videoShit(event, video_path, file_id):
+    if (await is_nsfw(file_id)):
+        await send_msg(event)
+        return
+    imageName = capture_screenshot(video_path)
+    for cum in imageName:
+        img = Image.open(cum)
+        with torch.no_grad():
+            inputs = processor(images=img, return_tensors="pt")
+            outputs = model(**inputs)
+            logits = outputs.logits
+
+        predicted_label = logits.argmax(-1).item()
+        if predicted_label:
+            await add_nsfw(file_id)
+            await send_msg(event)
             return
-
-        nsfw_flag = is_nsfw_image(img, kind)
-
-        if nsfw_flag:
-            await delete_nsfw_message(message)
-
-    # -------- PROCESS VIDEO-LIKE MEDIA --------
-    elif kind == "video":
-        frame_paths = capture_frames(file_path, max_frames=8)
-        if not frame_paths:
-            logger.error("No frames captured from video: %s", file_path)
         else:
-            nsfw_flag = False
-
-            for fp in frame_paths:
-                if not os.path.exists(fp):
-                    continue
-                try:
-                    img = Image.open(fp).convert("RGB")
-                except Exception as e:
-                    logger.error("Failed to open frame %s: %s", fp, e)
-                    continue
-
-                if is_nsfw_image(img, "video"):
-                    nsfw_flag = True
-                    break
-
-            if nsfw_flag:
-                await delete_nsfw_message(message)
-
-            # cleanup extracted frames
-            for fp in frame_paths:
-                try:
-                    os.remove(fp)
-                except OSError:
-                    pass
-
-    # -------- CLEANUP ORIGINAL FILE --------
-    try:
-        os.remove(file_path)
-    except OSError:
-        pass
+            await remove_nsfw(file_id)
+            return
