@@ -5,19 +5,18 @@ import os
 
 from pyrogram import idle
 
-from telegram.antinsfw import start_runtime, stop_runtime
-from telegram.bot import client
-from telegram.db import init_db
-
 logger = logging.getLogger(__name__)
 
 
 async def main() -> None:
-    importlib.import_module("telegram.antinsfw")
+    antinsfw = importlib.import_module("telegram.antinsfw")
     importlib.import_module("telegram.stats")
 
+    from telegram.bot import client
+    from telegram.db import init_db
+
     await init_db()
-    await start_runtime()
+    await antinsfw.start_runtime()
 
     started = False
     try:
@@ -31,10 +30,14 @@ async def main() -> None:
         logger.info("Bot started as @%s (%s)", me.username, me.id)
         await idle()
     finally:
-        await stop_runtime()
         if started:
-            await client.stop()
+            try:
+                await client.stop()
+            except RuntimeError as exc:
+                logger.warning("Pyrogram shutdown warning: %s", exc)
+        await antinsfw.stop_runtime()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(main())
