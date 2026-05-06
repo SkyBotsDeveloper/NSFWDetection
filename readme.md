@@ -104,6 +104,8 @@ Recommended but not strictly required:
 
 - Send messages, so the bot can post a short removal notice after deleting NSFW media.
 
+The bot does not need send-message permission to delete NSFW media. Without send-message permission, it can still delete when it has delete-message permission, but it cannot post the warning notice.
+
 Not required:
 
 - Ban users
@@ -112,9 +114,32 @@ Not required:
 - Pin messages
 - Manage video chats
 
-If your group setup or BotFather privacy settings prevent bots from receiving media, disable privacy mode from `@BotFather` or keep the bot as an admin. The bot cannot detect media it never receives from Telegram.
-
 Users can send `/help` to see this permission guide inside Telegram.
+
+## Optional Online Fallback
+
+The bot can optionally call a no-key online NSFW API after the local model returns a borderline-safe result. This is disabled by default because it uploads media to a third-party service and free no-key APIs have quota/availability limits.
+
+Built-in provider:
+
+- `naas`: `https://nsfw-categorize.it/api/upload`
+
+Enable it in `.env`:
+
+```env
+ONLINE_FALLBACK_ENABLED=true
+ONLINE_FALLBACK_PROVIDER=naas
+ONLINE_FALLBACK_URL=https://nsfw-categorize.it/api/upload
+ONLINE_FALLBACK_TIMEOUT_SECONDS=20
+ONLINE_FALLBACK_MAX_SIZE_MB=15
+ONLINE_FALLBACK_NSFW_THRESHOLD=0.85
+ONLINE_FALLBACK_MIN_LOCAL_NSFW_SCORE=0.35
+ONLINE_FALLBACK_FAST_MODE=true
+```
+
+`ONLINE_FALLBACK_MIN_LOCAL_NSFW_SCORE` controls when fallback is called. Lower values call the online API more often. Use `0.0` only if you accept higher external traffic and quota usage.
+
+Online fallback never runs before local cache. Repeated same media still hits memory/SQLite cache first.
 
 ## Public Commands
 
@@ -143,6 +168,7 @@ Shows local SQLite cache counts for NSFW stickers, NSFW media, temporary clean e
 ## Important Configuration
 
 - `NSFW_THRESHOLD`: Confidence required before taking moderation action. Failed processing is never treated as NSFW.
+- `ONLINE_FALLBACK_ENABLED`: Enables optional third-party online fallback for borderline local safe results.
 - `LOCAL_CACHE_DB`: Local SQLite WAL cache path for sticker/media NSFW decisions. Keep this on fast VPS disk.
 - `HOT_CACHE_MAX_SIZE`, `HOT_CACHE_TTL_SECONDS`: In-memory hot cache for repeated sticker/media spam.
 - `CLEAN_MEDIA_CACHE_TTL_SECONDS`: Short TTL for clean media cache entries. NSFW entries are kept long-term.

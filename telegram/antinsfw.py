@@ -26,6 +26,7 @@ from telegram.db import (
 from telegram.detector import DetectionResult, detector
 from telegram.local_cache import LocalCacheRecord, local_nsfw_cache
 from telegram.metrics import metrics
+from telegram.online_fallback import detect_with_online_fallback
 from telegram.rate_limit import SlidingWindowRateLimiter
 
 logger = logging.getLogger(__name__)
@@ -42,8 +43,7 @@ Minimum group setup:
 - Enable only this required admin power: Delete messages.
 
 Recommended:
-- Allow me to send messages, so I can post a short removal notice.
-- Keep Telegram media visible to bots. If privacy mode blocks media in your setup, disable bot privacy from @BotFather or keep me as admin.
+- Send messages, only if you want me to post a short removal notice.
 
 Not required:
 - Ban users.
@@ -380,6 +380,21 @@ async def _process_job(job: MediaJob) -> None:
                             result = await _detect_with_timeout(downloaded_path, job.detector_kind)
                     else:
                         result = await _detect_with_timeout(downloaded_path, job.detector_kind)
+                    fallback_result = await detect_with_online_fallback(
+                        downloaded_path,
+                        job.detector_kind,
+                        result,
+                    )
+                    if fallback_result is not None:
+                        logger.info(
+                            "online fallback result key=%s media=%s status=%s confidence=%.4f label=%s",
+                            cache_key or job.dedupe_key,
+                            job.media_type,
+                            fallback_result.status,
+                            fallback_result.confidence,
+                            fallback_result.label,
+                        )
+                        result = fallback_result
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
     except asyncio.TimeoutError:

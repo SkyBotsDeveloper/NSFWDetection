@@ -46,6 +46,13 @@ def _float(name: str, default: float, minimum: Optional[float] = None) -> float:
     return value
 
 
+def _bool(name: str, default: bool = False) -> bool:
+    raw = _str(name)
+    if not raw:
+        return default
+    return raw.lower() in {"1", "true", "yes", "on", "enable", "enabled"}
+
+
 @dataclass(frozen=True)
 class Settings:
     api_id: int
@@ -66,6 +73,14 @@ class Settings:
     nsfw_threshold: float
     torch_device: str
     torch_num_threads: int
+    online_fallback_enabled: bool
+    online_fallback_provider: str
+    online_fallback_url: str
+    online_fallback_timeout_seconds: float
+    online_fallback_max_size_mb: int
+    online_fallback_nsfw_threshold: float
+    online_fallback_min_local_nsfw_score: float
+    online_fallback_fast_mode: bool
 
     queue_max_size: int
     worker_count: int
@@ -110,6 +125,10 @@ class Settings:
     def max_document_size_bytes(self) -> int:
         return self.max_document_size_mb * 1024 * 1024
 
+    @property
+    def online_fallback_max_size_bytes(self) -> int:
+        return self.online_fallback_max_size_mb * 1024 * 1024
+
 
 settings = Settings(
     api_id=_int("API_ID", 0, 0),
@@ -129,6 +148,14 @@ settings = Settings(
     nsfw_threshold=_float("NSFW_THRESHOLD", 0.85, 0.0),
     torch_device=_str("TORCH_DEVICE", "auto").lower(),
     torch_num_threads=_int("TORCH_NUM_THREADS", 0, 0),
+    online_fallback_enabled=_bool("ONLINE_FALLBACK_ENABLED", False),
+    online_fallback_provider=_str("ONLINE_FALLBACK_PROVIDER", "naas").lower(),
+    online_fallback_url=_str("ONLINE_FALLBACK_URL", "https://nsfw-categorize.it/api/upload"),
+    online_fallback_timeout_seconds=_float("ONLINE_FALLBACK_TIMEOUT_SECONDS", 20.0, 1.0),
+    online_fallback_max_size_mb=_int("ONLINE_FALLBACK_MAX_SIZE_MB", 15, 1),
+    online_fallback_nsfw_threshold=_float("ONLINE_FALLBACK_NSFW_THRESHOLD", 0.85, 0.0),
+    online_fallback_min_local_nsfw_score=_float("ONLINE_FALLBACK_MIN_LOCAL_NSFW_SCORE", 0.35, 0.0),
+    online_fallback_fast_mode=_bool("ONLINE_FALLBACK_FAST_MODE", True),
     queue_max_size=_int("QUEUE_MAX_SIZE", 500, 1),
     worker_count=_int("WORKER_COUNT", 4, 1),
     inference_workers=_int("INFERENCE_WORKERS", 1, 1),
