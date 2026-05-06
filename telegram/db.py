@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional
 
 import motor.motor_asyncio
 from pymongo import ASCENDING
-from pymongo.errors import PyMongoError
+from pymongo.errors import DuplicateKeyError, PyMongoError
 
 from telegram.config import settings
 
@@ -33,13 +33,55 @@ def normalize_chat_type(chat_type: Any) -> str:
 
 async def init_db() -> None:
     try:
-        await userdb.create_index([("user_id", ASCENDING)], unique=True)
-        await chatdb.create_index([("chat_id", ASCENDING)], unique=True)
+        await _dedupe_collection(userdb, "user_id")
+        await _dedupe_collection(chatdb, "chat_id")
+        await _ensure_unique_index(userdb, "user_id", "uniq_user_id")
+        await _ensure_unique_index(chatdb, "chat_id", "uniq_chat_id")
         await chatdb.create_index([("active", ASCENDING), ("chat_type", ASCENDING)])
+    except DuplicateKeyError:
+        logger.exception("MongoDB still has duplicate chat/user rows after cleanup")
     except PyMongoError:
         logger.exception("MongoDB index initialization failed")
     except Exception:
         logger.exception("Unexpected DB initialization failure")
+
+
+async def _dedupe_collection(collection: Any, key: str) -> None:
+    pipeline = [
+        {"$match": {key: {"$exists": True}}},
+        {"$sort": {"last_seen": -1, "_id": 1}},
+        {"$group": {"_id": f"${key}", "ids": {"$push": "$_id"}, "count": {"$sum": 1}}},
+        {"$match": {"count": {"$gt": 1}}},
+    ]
+    removed = 0
+    async for duplicate in collection.aggregate(pipeline, allowDiskUse=True):
+        ids = duplicate.get("ids", [])
+        stale_ids = ids[1:]
+        if not stale_ids:
+            continue
+        result = await collection.delete_many({"_id": {"$in": stale_ids}})
+        removed += result.deleted_count
+
+    if removed:
+        logger.warning("Removed %s duplicate MongoDB rows from %s on key=%s", removed, collection.name, key)
+
+
+async def _ensure_unique_index(collection: Any, key: str, name: str) -> None:
+    expected_key = {key: 1}
+    async for index in collection.list_indexes():
+        if dict(index.get("key", {})) != expected_key:
+            continue
+        if index.get("unique"):
+            return
+        await collection.drop_index(index["name"])
+        logger.warning("Dropped non-unique MongoDB index %s.%s", collection.name, index["name"])
+
+    await collection.create_index(
+        [(key, ASCENDING)],
+        unique=True,
+        name=name,
+        partialFilterExpression={key: {"$exists": True}},
+    )
 
 
 async def add_user(
