@@ -20,8 +20,14 @@ _broadcast_lock = asyncio.Lock()
 @client.on_message(filters.command("stats"), group=1)
 async def stats(_, message: Message) -> None:
     if not _is_owner(message):
+        logger.info(
+            "stats command ignored non-owner user_id=%s owner_id=%s",
+            getattr(getattr(message, "from_user", None), "id", None),
+            settings.owner_id,
+        )
         return
 
+    logger.info("stats command accepted user_id=%s", getattr(message.from_user, "id", None))
     counts = await get_chat_counts()
     runtime = get_runtime_stats()
     await _safe_reply_text(message, _format_stats(counts, runtime))
@@ -30,6 +36,11 @@ async def stats(_, message: Message) -> None:
 @client.on_message(filters.command("broadcast"), group=1)
 async def broadcast(app, message: Message) -> None:
     if not _is_owner(message):
+        logger.info(
+            "broadcast command ignored non-owner user_id=%s owner_id=%s",
+            getattr(getattr(message, "from_user", None), "id", None),
+            settings.owner_id,
+        )
         return
 
     text = _command_payload(message)
@@ -68,8 +79,14 @@ async def broadcast(app, message: Message) -> None:
 @client.on_message(filters.command("cache_stats"), group=1)
 async def cache_stats(_, message: Message) -> None:
     if not _is_owner(message):
+        logger.info(
+            "cache_stats command ignored non-owner user_id=%s owner_id=%s",
+            getattr(getattr(message, "from_user", None), "id", None),
+            settings.owner_id,
+        )
         return
 
+    logger.info("cache_stats command accepted user_id=%s", getattr(message.from_user, "id", None))
     stats = await local_nsfw_cache.stats()
     await _safe_reply_text(message, _format_cache_stats(stats))
 
@@ -87,7 +104,13 @@ def _command_payload(message: Message) -> str:
 
 async def _safe_reply_text(message: Message, text: str) -> Optional[Message]:
     try:
-        return await message.reply_text(text)
+        sent = await message.reply_text(text)
+        logger.info(
+            "owner command reply sent chat_id=%s message_id=%s",
+            getattr(message.chat, "id", None),
+            getattr(message, "id", None),
+        )
+        return sent
     except RPCError as exc:
         logger.warning("Failed to send owner command reply chat_id=%s error=%s", getattr(message.chat, "id", None), exc)
     except Exception as exc:

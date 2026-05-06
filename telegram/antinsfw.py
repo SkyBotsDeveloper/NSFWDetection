@@ -127,8 +127,25 @@ async def track_chat_handler(_, message: Message) -> None:
     _schedule_chat_tracking(message)
 
 
-@client.on_message(filters.command("start"), group=1)
+@client.on_message(filters.private & filters.text, group=-90)
+async def private_text_logger(_, message: Message) -> None:
+    text = message.text or message.caption or ""
+    if text.startswith("/"):
+        logger.info(
+            "private command received chat_id=%s user_id=%s text=%s",
+            getattr(message.chat, "id", None),
+            getattr(getattr(message, "from_user", None), "id", None),
+            text.split(maxsplit=1)[0],
+        )
+
+
+@client.on_message(filters.regex(r"^/start(?:@\w+)?(?:\s|$)") & filters.text, group=1)
 async def start(_, message: Message) -> None:
+    logger.info(
+        "start command handler chat_id=%s user_id=%s",
+        getattr(message.chat, "id", None),
+        getattr(getattr(message, "from_user", None), "id", None),
+    )
     _schedule_chat_tracking(message, force=True)
     buttons = [
         [
@@ -619,6 +636,11 @@ async def _short_flood_sleep(exc: FloodWait) -> None:
 async def _safe_reply(message: Message, text: str, **kwargs: Any) -> None:
     try:
         await message.reply_text(text, **kwargs)
+        logger.info(
+            "reply sent chat_id=%s message_id=%s",
+            getattr(message.chat, "id", None),
+            getattr(message, "id", None),
+        )
     except RPCError as exc:
         logger.warning("Failed to reply chat_id=%s error=%s", getattr(message.chat, "id", None), exc)
     except Exception as exc:
