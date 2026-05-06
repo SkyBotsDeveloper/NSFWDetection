@@ -133,11 +133,11 @@ ONLINE_FALLBACK_URL=https://nsfw-categorize.it/api/upload
 ONLINE_FALLBACK_TIMEOUT_SECONDS=20
 ONLINE_FALLBACK_MAX_SIZE_MB=15
 ONLINE_FALLBACK_NSFW_THRESHOLD=0.85
-ONLINE_FALLBACK_MIN_LOCAL_NSFW_SCORE=0.35
+ONLINE_FALLBACK_MIN_LOCAL_NSFW_SCORE=0.0
 ONLINE_FALLBACK_FAST_MODE=true
 ```
 
-`ONLINE_FALLBACK_MIN_LOCAL_NSFW_SCORE` controls when fallback is called. Lower values call the online API more often. Use `0.0` only if you accept higher external traffic and quota usage.
+`ONLINE_FALLBACK_MIN_LOCAL_NSFW_SCORE` controls when fallback is called. Use `0.0` to catch false negatives where the local model is confidently wrong, especially suggestive animated stickers. Higher values reduce external API traffic but can miss cases.
 
 Online fallback never runs before local cache. Repeated same media still hits memory/SQLite cache first.
 

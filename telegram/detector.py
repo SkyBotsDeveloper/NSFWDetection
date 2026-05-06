@@ -160,23 +160,12 @@ class NsfwDetector:
         if frame_count <= 0:
             return [0]
 
+        positions = set(self._evenly_spaced_indexes(frame_count, max_frames))
         if fps > 0:
             step = max(1, int(fps * settings.video_frame_interval_seconds))
-            positions = list(range(0, frame_count, step))
-        else:
-            step = max(1, frame_count // max_frames)
-            positions = list(range(0, frame_count, step))
+            positions.update(range(0, frame_count, step))
 
-        if not positions:
-            positions = [0]
-
-        if len(positions) > max_frames:
-            if max_frames == 1:
-                return [positions[len(positions) // 2]]
-            stride = (len(positions) - 1) / float(max_frames - 1)
-            positions = [positions[int(round(i * stride))] for i in range(max_frames)]
-
-        return sorted(set(max(0, min(frame_count - 1, pos)) for pos in positions))
+        return self._cap_positions(sorted(positions), frame_count, max_frames)
 
     def _sample_gif_indexes(self, frame_count: int) -> set[int]:
         frame_count = max(1, int(frame_count or 1))
@@ -185,6 +174,21 @@ class NsfwDetector:
             return {frame_count // 2}
         stride = (frame_count - 1) / float(max_frames - 1)
         return {int(round(i * stride)) for i in range(max_frames)}
+
+    def _evenly_spaced_indexes(self, frame_count: int, max_frames: int) -> List[int]:
+        frame_count = max(1, int(frame_count or 1))
+        max_frames = min(max(1, max_frames), frame_count)
+        if max_frames == 1:
+            return [frame_count // 2]
+        stride = (frame_count - 1) / float(max_frames - 1)
+        return [int(round(i * stride)) for i in range(max_frames)]
+
+    def _cap_positions(self, positions: List[int], frame_count: int, max_frames: int) -> List[int]:
+        bounded = sorted(set(max(0, min(frame_count - 1, pos)) for pos in positions))
+        if len(bounded) <= max_frames:
+            return bounded
+        selected = self._evenly_spaced_indexes(len(bounded), max_frames)
+        return [bounded[index] for index in selected]
 
     def _predict(self, image: Any) -> Tuple[bool, float, str]:
         self._ensure_loaded()
