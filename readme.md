@@ -33,7 +33,7 @@ NSFW_THRESHOLD=0.85
 Start the bot:
 
 ```bash
-python3 -m telegram
+bash start
 ```
 
 On Windows PowerShell, activate the virtual environment with:
@@ -41,6 +41,58 @@ On Windows PowerShell, activate the virtual environment with:
 ```powershell
 .\venv\Scripts\Activate.ps1
 ```
+
+## VPS Auto Restart
+
+Use `systemd` on a Linux VPS so the bot starts automatically after reboot and restarts if it crashes.
+
+After setup and after `.env` is filled:
+
+```bash
+chmod +x start scripts/install_systemd.sh
+sudo -E bash scripts/install_systemd.sh
+```
+
+This creates and starts `/etc/systemd/system/nsfw-bot.service` for the current repo path. It uses `./venv/bin/python` automatically when the virtual environment exists.
+
+Useful service commands:
+
+```bash
+sudo systemctl status nsfw-bot
+sudo journalctl -u nsfw-bot -f
+sudo systemctl restart nsfw-bot
+sudo systemctl stop nsfw-bot
+```
+
+To install with a different service name or user:
+
+```bash
+sudo env SERVICE_NAME=my-nsfw-bot SERVICE_USER=ubuntu bash scripts/install_systemd.sh
+```
+
+After VPS reboot, systemd will start the bot automatically because the installer runs `systemctl enable nsfw-bot`.
+
+## Media Detection Coverage
+
+Detected when within configured size limits:
+
+- Telegram photos.
+- Static image stickers such as WebP/image stickers.
+- Video stickers such as WebM stickers.
+- Telegram videos.
+- Telegram animations/GIF-style media.
+- Documents that are images.
+- Documents that are videos.
+- GIF documents.
+
+Skipped safely:
+
+- TGS/Lottie animated stickers (`application/x-tgsticker`) because they need a separate renderer before frame detection.
+- Unsupported document MIME types.
+- Media larger than `MAX_IMAGE_SIZE_MB`, `MAX_VIDEO_SIZE_MB`, or `MAX_DOCUMENT_SIZE_MB`.
+- Media that fails download, decode, or model processing.
+
+Failed processing is never treated as NSFW. The bot logs the error and skips that item.
 
 ## Owner Commands
 
