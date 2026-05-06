@@ -94,6 +94,38 @@ Skipped safely:
 
 Failed processing is never treated as NSFW. The bot logs the error and skips that item.
 
+## Minimum Telegram Permissions
+
+For group/supergroup moderation, add the bot as an admin with this minimum permission:
+
+- Delete messages
+
+Recommended but not strictly required:
+
+- Send messages, so the bot can post a short removal notice after deleting NSFW media.
+
+Not required:
+
+- Ban users
+- Add new admins
+- Change group info
+- Pin messages
+- Manage video chats
+
+If your group setup or BotFather privacy settings prevent bots from receiving media, disable privacy mode from `@BotFather` or keep the bot as an admin. The bot cannot detect media it never receives from Telegram.
+
+Users can send `/help` to see this permission guide inside Telegram.
+
+## Public Commands
+
+`/start`
+
+Shows the startup message.
+
+`/help`
+
+Shows required bot permissions, supported media types, and skipped media types.
+
 ## Owner Commands
 
 `/stats`

@@ -34,6 +34,39 @@ MODERATED_CHAT_TYPES = {"group", "supergroup", "channel"}
 SUPPORTED_IMAGE_MIME_PREFIX = "image/"
 SUPPORTED_VIDEO_MIME_PREFIX = "video/"
 UNSUPPORTED_STICKER_MIME_TYPES = {"application/x-tgsticker"}
+HELP_TEXT = """NSFW moderation bot help
+
+Minimum group setup:
+- Add me to your group/supergroup.
+- Make me admin.
+- Enable only this required admin power: Delete messages.
+
+Recommended:
+- Allow me to send messages, so I can post a short removal notice.
+- Keep Telegram media visible to bots. If privacy mode blocks media in your setup, disable bot privacy from @BotFather or keep me as admin.
+
+Not required:
+- Ban users.
+- Add new admins.
+- Change group info.
+- Pin messages.
+- Manage video chats.
+
+Detected media:
+- Photos.
+- Static stickers.
+- Video stickers.
+- Videos.
+- GIFs/animations.
+- Image/video/GIF documents.
+
+Skipped safely:
+- TGS/Lottie animated stickers.
+- Unsupported documents.
+- Files above configured size limits.
+- Failed downloads or failed model processing.
+
+Failed processing is never treated as NSFW."""
 
 
 @dataclass(frozen=True)
@@ -156,9 +189,20 @@ async def start(_, message: Message) -> None:
     reply_markup = InlineKeyboardMarkup(buttons)
     await _safe_reply(
         message,
-        "Hello. Send media here or add me as an admin with delete-message permission in a group, and I will moderate NSFW media.",
+        "Hello. Send media here or add me as an admin with delete-message permission in a group, and I will moderate NSFW media.\n\nUse /help to see the minimum permissions I need.",
         reply_markup=reply_markup,
     )
+
+
+@client.on_message(filters.regex(r"^/help(?:@\w+)?(?:\s|$)") & filters.text, group=1)
+async def help_command(_, message: Message) -> None:
+    logger.info(
+        "help command handler chat_id=%s user_id=%s",
+        getattr(message.chat, "id", None),
+        getattr(getattr(message, "from_user", None), "id", None),
+    )
+    _schedule_chat_tracking(message, force=True)
+    await _safe_reply(message, HELP_TEXT)
 
 
 @client.on_message(
