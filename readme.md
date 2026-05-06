@@ -1,90 +1,77 @@
-# Enhanced Version: NSFW Detection Telegram Bot
+# Telegram NSFW Detection Bot
 
-Welcome to the NSFW Detection Telegram Bot, an advanced tool designed to identify Not Safe for Work (NSFW) content in images through cutting-edge machine learning algorithms. The bot is written in Python using pyrogram, torch, transformers, TensorFlow, OpenCV, Pillow, and MongoDB.
+Production-oriented Telegram moderation bot for detecting and removing NSFW media in groups, channels, and private chats.
 
-## Acknowledgments
+The bot uses Pyrogram, MongoDB, and the `Falconsai/nsfw_image_detection` Hugging Face model. Media processing is handled through a bounded async queue with worker limits, file-size limits, download and processing timeouts, duplicate suppression, and temp-file cleanup.
 
-This project leverages the powerful `Falconsai/nsfw_image_detection` pre-trained model and dataset. We extend our gratitude to them for their contributions, enabling the functionality of this bot.
+Sticker/media NSFW cache is stored locally on disk in SQLite WAL mode at `./data/nsfw_cache.sqlite` by default. MongoDB is only used for chat/user persistence and broadcast targets.
 
-## Getting Started
-
-<h2 align="center"> 
-   ⇝ Requirements ⇜
-</h2>
-
-<p align="center">
-    <a href="https://www.python.org/downloads/release/python-390/"> Python 3.9 </a> |
-    <a href="https://docs.pyrogram.org/intro/setup#api-keys"> Telegram API Key </a> |
-    <a href="https://t.me/botfather"> Telegram Bot Token </a> | 
-    <a href="https://graph.org/How-To-get-Mongodb-URI-04-06"> MongoDB URI </a>
-</p>
-
-Follow these simple steps to unleash the power of the NSFW Detection Telegram Bot:
-
-1. Begin by ensuring you have Git installed. If not, you can install it by running:
-
-  ```bash
-   sudo apt-get update
-   sudo apt-get install git
-   ```
-
-   Then, clone the repository into your terminal:
-
-  ```bash
-   git clone https://github.com/SkyBotsDeveloper/NSFWDetection
-   ```
-   
-2. Now navigate into the directory:
-
-   ```bash
-   cd NSFWDetection
-   ```
-
-3. Install the necessary dependencies. Execute the following command:
-
-    ```bash
-    pip3 install -U -r requirements.txt
-    ```
-
-4. Acquire a Telegram Bot API token by creating a new bot through [Telegram BotFather](https://core.telegram.org/bots#botfather).
-
-5. Personalize the `telegram/__init__.py` script by replacing the variables with your Telegram Bot API token.
-
-6. Launch the bot using the following command:
-
-    ```bash
-    python3 -m telegram
-    ```
-
-7. Integrate the bot into your Telegram group or chat, and send an image for analysis. The bot will promptly provide you with the results.
-
-## Dependencies
-
-Ensure you have the following dependencies installed to run the NSFW Detection Telegram Bot seamlessly:
-
-- Python 3.x
-- TensorFlow
-- Pillow
-- pyrogram 2.x
-- motor
-- OpenCV
-- torch
-- transformers
-
-## Script Testing (Unrelated to Telegram)
-
-Evaluate the script's performance by executing the command below in your terminal and supplying the image file path:
+## Setup
 
 ```bash
-pip3 install -U -r requirements.txt
+git clone https://github.com/SkyBotsDeveloper/NSFWDetection
+cd NSFWDetection
+python3 -m venv venv
+source venv/bin/activate
+pip install -U pip && pip install -r requirements.txt
+cp .env.example .env
 ```
+
+Edit `.env` and set at minimum:
+
+```env
+BOT_TOKEN=your_bot_token
+API_ID=your_api_id
+API_HASH=your_api_hash
+OWNER_ID=your_telegram_user_id
+MONGO_URI=mongodb://localhost:27017
+DATABASE_NAME=nsfw
+LOCAL_CACHE_DB=./data/nsfw_cache.sqlite
+NSFW_THRESHOLD=0.85
+```
+
+Start the bot:
 
 ```bash
-python3 main.py
+python3 -m telegram
 ```
 
-## Support the Project
+On Windows PowerShell, activate the virtual environment with:
 
-If you find the NSFW Detection project useful, consider supporting the project through a donation. Your contributions help us maintain and improve the service.
+```powershell
+.\venv\Scripts\Activate.ps1
+```
 
-- **UPI**: `arsh-j@paytm`
+## Owner Commands
+
+`/stats`
+
+Shows active groups, active channels, private users, known chats, inactive chats, uptime, queue size, active workers, processed messages, skipped messages, NSFW detections, and errors.
+
+`/broadcast <message>`
+
+Sends a text broadcast to every active group, channel, and private chat in MongoDB. You can also reply to a message with `/broadcast` to copy that replied message to all active targets. Broadcasts are rate-limited and mark unreachable chats inactive when Telegram reports blocked, forbidden, removed, or no-permission errors.
+
+`/cache_stats`
+
+Shows local SQLite cache counts for NSFW stickers, NSFW media, temporary clean entries, database size, hot in-memory cache size, and pending cache writes.
+
+## Important Configuration
+
+- `NSFW_THRESHOLD`: Confidence required before taking moderation action. Failed processing is never treated as NSFW.
+- `LOCAL_CACHE_DB`: Local SQLite WAL cache path for sticker/media NSFW decisions. Keep this on fast VPS disk.
+- `HOT_CACHE_MAX_SIZE`, `HOT_CACHE_TTL_SECONDS`: In-memory hot cache for repeated sticker/media spam.
+- `CLEAN_MEDIA_CACHE_TTL_SECONDS`: Short TTL for clean media cache entries. NSFW entries are kept long-term.
+- `QUEUE_MAX_SIZE`, `WORKER_COUNT`, `INFERENCE_WORKERS`: Backpressure and concurrency controls.
+- `MAX_IMAGE_SIZE_MB`, `MAX_VIDEO_SIZE_MB`, `MAX_DOCUMENT_SIZE_MB`: File-size limits before download or processing.
+- `DOWNLOAD_TIMEOUT_SECONDS`, `PROCESSING_TIMEOUT_SECONDS`: Prevent stuck downloads or model/video processing from blocking workers indefinitely.
+- `PER_USER_RATE_LIMIT`, `PER_CHAT_RATE_LIMIT`, `GLOBAL_RATE_LIMIT`: Spam protection.
+- `BROADCAST_DELAY_SECONDS`: Delay between broadcast sends to reduce Telegram flood risk.
+
+## Local File Test
+
+You can run detection against a local image or video without starting the bot:
+
+```bash
+python3 main.py /path/to/media.jpg
+```

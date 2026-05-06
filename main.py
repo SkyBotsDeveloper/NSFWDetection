@@ -1,78 +1,42 @@
-import cv2
-from PIL import Image
-import torch
-from transformers import AutoModelForImageClassification, ViTImageProcessor
+import argparse
+from pathlib import Path
 
-model = AutoModelForImageClassification.from_pretrained("Falconsai/nsfw_image_detection")
-processor = ViTImageProcessor.from_pretrained('Falconsai/nsfw_image_detection')
+from telegram.detector import detector
 
-def getimage():
-    print("Enter the file path of the image: ")
-    while True:
-        path = input()
-        if path:
-            break
-    if path.endswith(".png") or path.endswith(".jpg") or path.endswith(".jpeg"):
-        try:
-            img = Image.open(path)
-        except Exception as e:
-            print("Invalid file path. Error: ", e)
-            return
-        with torch.no_grad():
-            inputs = processor(images=img, return_tensors="pt")
-            outputs = model(**inputs)
-            logits = outputs.logits
 
-        predicted_label = logits.argmax(-1).item()
-        if predicted_label:
-            print("NSFW")
-        else:
-            print("Not NSFW")
-    
-    elif path.endswith(".mp4") or path.endswith(".webm"):
-        videoShit(path)
-    
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+GIF_EXTENSIONS = {".gif"}
+VIDEO_EXTENSIONS = {".mp4", ".webm", ".mov", ".mkv", ".avi"}
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Run NSFW detection on a local media file.")
+    parser.add_argument("path", type=Path, help="Image or video path")
+    args = parser.parse_args()
+
+    path = args.path.expanduser().resolve()
+    if not path.exists():
+        print(f"File not found: {path}")
+        return 2
+
+    suffix = path.suffix.lower()
+    if suffix in IMAGE_EXTENSIONS:
+        media_kind = "image"
+    elif suffix in GIF_EXTENSIONS:
+        media_kind = "gif"
+    elif suffix in VIDEO_EXTENSIONS:
+        media_kind = "video"
     else:
-        print("Invalid file format")
+        print(f"Unsupported file type: {suffix or 'unknown'}")
+        return 2
 
-def capture_screenshot(path):
-    vidObj = cv2.VideoCapture(path)
-    fps = vidObj.get(cv2.CAP_PROP_FPS)
-    frames_to_skip = int(fps * 10)
-
-    count = 0
-    success = 1
-    saved_image_names = []
-
-    while success:
-        success, image = vidObj.read()
-        if frames_to_skip > 0 and count % frames_to_skip == 0:
-            image_name = f"image_{count // frames_to_skip}.png"
-            cv2.imwrite(image_name, image)
-            saved_image_names.append(image_name)
-
-        count += 1
-
-    vidObj.release()
-    
-    return saved_image_names
-
-
-def videoShit(video_path):
-    imageName = capture_screenshot(video_path)
-    for cum in imageName:
-        img = Image.open(cum)
-        with torch.no_grad():
-            inputs = processor(images=img, return_tensors="pt")
-            outputs = model(**inputs)
-            logits = outputs.logits
-
-        predicted_label = logits.argmax(-1).item()
-        if predicted_label:
-            print("NSFW")
-        else:
-            print("Not NSFW")
+    result = detector.detect_file(path, media_kind)
+    print(
+        f"status={result.status} confidence={result.confidence:.4f} "
+        f"label={result.label or 'unknown'} frames={result.frames_checked} reason={result.reason or '-'}"
+    )
+    return 0 if result.status in {"safe", "nsfw"} else 1
 
 
 if __name__ == "__main__":
-    getimage()
+    raise SystemExit(main())

@@ -1,0 +1,14 @@
+.env
+*.session
+*.session-journal
+tmp/
+downloads/
+data/*.sqlite
+data/*.sqlite-*
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+venv/
+.venv/

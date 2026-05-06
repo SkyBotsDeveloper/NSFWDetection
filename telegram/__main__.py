@@ -1,23 +1,40 @@
 import asyncio
 import importlib
-from telegram import client
-from uvloop import install
-from pyrogram import idle
 import logging
+import os
 
-loop = asyncio.get_event_loop()
+from pyrogram import idle
+
+from telegram.antinsfw import start_runtime, stop_runtime
+from telegram.bot import client
+from telegram.db import init_db
+
+logger = logging.getLogger(__name__)
 
 
-imported_module = importlib.import_module("telegram.antinsfw")
-imported_module = importlib.import_module("telegram.stats")
-imported_module = importlib.import_module("telegram.db")
+async def main() -> None:
+    importlib.import_module("telegram.antinsfw")
+    importlib.import_module("telegram.stats")
 
-async def gae():
-    install()
-    await client.start()
-    await idle()
-    await client.stop()
+    await init_db()
+    await start_runtime()
+
+    started = False
+    try:
+        if os.getenv("STARTUP_CHECK_ONLY") == "1":
+            logger.info("Startup check completed")
+            return
+
+        await client.start()
+        started = True
+        me = await client.get_me()
+        logger.info("Bot started as @%s (%s)", me.username, me.id)
+        await idle()
+    finally:
+        await stop_runtime()
+        if started:
+            await client.stop()
+
 
 if __name__ == "__main__":
-    logging.info("Bot Started! Powered By @VivaanNetwork")
-    loop.run_until_complete(gae())
+    asyncio.run(main())
