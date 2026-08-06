@@ -53,6 +53,26 @@
       "description": "PyTorch device for inference",
       "value": "cpu"
     },
+    "ONLINE_FALLBACK_ENABLED": {
+      "description": "Enable conservative online fallback for borderline safe cases",
+      "value": "true"
+    },
+    "ONLINE_FALLBACK_TIMEOUT_SECONDS": {
+      "description": "Timeout for online fallback requests",
+      "value": "8"
+    },
+    "ONLINE_FALLBACK_MAX_SIZE_MB": {
+      "description": "Maximum file size for online fallback",
+      "value": "10"
+    },
+    "ONLINE_FALLBACK_NSFW_THRESHOLD": {
+      "description": "Confidence threshold for fallback to mark content as NSFW",
+      "value": "0.85"
+    },
+    "ONLINE_FALLBACK_MIN_LOCAL_NSFW_SCORE": {
+      "description": "Minimum local confidence before fallback is attempted",
+      "value": "0.35"
+    },
     "WORKER_COUNT": {
       "description": "Number of worker tasks",
       "value": "1"
