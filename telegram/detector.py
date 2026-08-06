@@ -160,7 +160,12 @@ class NsfwDetector:
         if frame_count <= 0:
             return [0]
 
-        positions = set(self._evenly_spaced_indexes(frame_count, max_frames))
+        positions = {0, frame_count // 2, frame_count - 1}
+        if frame_count <= max_frames:
+            return self._cap_positions(sorted(positions), frame_count, max_frames)
+
+        if max_frames > 3:
+            positions.update(self._evenly_spaced_indexes(frame_count, max_frames))
         if fps > 0:
             step = max(1, int(fps * settings.video_frame_interval_seconds))
             positions.update(range(0, frame_count, step))
@@ -172,8 +177,13 @@ class NsfwDetector:
         max_frames = min(settings.max_video_frames, frame_count)
         if max_frames == 1:
             return {frame_count // 2}
-        stride = (frame_count - 1) / float(max_frames - 1)
-        return {int(round(i * stride)) for i in range(max_frames)}
+        if max_frames == 2:
+            return {0, frame_count - 1}
+
+        positions = {0, frame_count // 2, frame_count - 1}
+        if max_frames > 3:
+            positions.update(self._evenly_spaced_indexes(frame_count, max_frames))
+        return set(self._cap_positions(sorted(positions), frame_count, max_frames))
 
     def _evenly_spaced_indexes(self, frame_count: int, max_frames: int) -> List[int]:
         frame_count = max(1, int(frame_count or 1))
