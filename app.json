@@ -1,0 +1,73 @@
+{
+  "name": "NSFWDetection",
+  "description": "Telegram moderation bot for detecting and removing NSFW media in groups, channels, and private chats.",
+  "repository": "https://github.com/SkyBotsDeveloper/NSFWDetection",
+  "logo": "https://raw.githubusercontent.com/SkyBotsDeveloper/NSFWDetection/main/readme.md",
+  "keywords": ["telegram", "bot", "nsfw", "moderation", "pyrogram"],
+  "stack": "heroku-24",
+  "buildpacks": [
+    {
+      "url": "https://github.com/heroku/heroku-buildpack-python"
+    }
+  ],
+  "formation": {
+    "worker": {
+      "quantity": 1,
+      "size": "standard-2x"
+    }
+  },
+  "env": {
+    "BOT_TOKEN": {
+      "description": "Telegram bot token from BotFather",
+      "required": true
+    },
+    "API_ID": {
+      "description": "Telegram API ID",
+      "required": true
+    },
+    "API_HASH": {
+      "description": "Telegram API hash",
+      "required": true
+    },
+    "OWNER_ID": {
+      "description": "Your Telegram user ID",
+      "required": true
+    },
+    "MONGO_URI": {
+      "description": "MongoDB URI for chat/user persistence",
+      "required": true
+    },
+    "DATABASE_NAME": {
+      "description": "MongoDB database name",
+      "value": "nsfw"
+    },
+    "LOCAL_CACHE_DB": {
+      "description": "SQLite cache location on Heroku",
+      "value": "/tmp/nsfw_cache.sqlite"
+    },
+    "TEMP_DIR": {
+      "description": "Temp directory for downloaded media",
+      "value": "/tmp"
+    },
+    "TORCH_DEVICE": {
+      "description": "PyTorch device for inference",
+      "value": "cpu"
+    },
+    "WORKER_COUNT": {
+      "description": "Number of worker tasks",
+      "value": "1"
+    },
+    "INFERENCE_WORKERS": {
+      "description": "Number of inference worker threads",
+      "value": "1"
+    },
+    "PYROGRAM_WORKERS": {
+      "description": "Pyrogram worker count",
+      "value": "8"
+    },
+    "LOG_LEVEL": {
+      "description": "Logging level",
+      "value": "INFO"
+    }
+  }
+}

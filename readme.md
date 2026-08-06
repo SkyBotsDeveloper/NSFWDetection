@@ -6,6 +6,12 @@ The bot uses Pyrogram, MongoDB, and the `Falconsai/nsfw_image_detection` Hugging
 
 Sticker/media NSFW cache is stored locally on disk in SQLite WAL mode at `./data/nsfw_cache.sqlite` by default. MongoDB is only used for chat/user persistence and broadcast targets.
 
+## One-Click Heroku Deploy
+
+[![Deploy](https://www.herokucdn.com/deploy/button.svg)](https://heroku.com/deploy?template=https://github.com/SkyBotsDeveloper/NSFWDetection)
+
+This will create a Heroku worker dyno and prompt you for the required environment variables such as `BOT_TOKEN`, `API_ID`, `API_HASH`, `OWNER_ID`, and `MONGO_URI`.
+
 ## Setup
 
 ```bash
