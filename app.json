@@ -67,11 +67,11 @@
     },
     "MAX_VIDEO_FRAMES": {
       "description": "Number of sampled frames for videos",
-      "value": "5"
+      "value": "8"
     },
     "VIDEO_FRAME_INTERVAL_SECONDS": {
       "description": "Sampling interval for videos",
-      "value": "3"
+      "value": "4"
     },
     "LOG_LEVEL": {
       "description": "Logging level",
