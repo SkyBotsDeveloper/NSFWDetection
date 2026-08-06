@@ -3,6 +3,12 @@ import importlib
 import logging
 import os
 
+try:
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+except RuntimeError:
+    pass
+
 from pyrogram import idle
 
 logger = logging.getLogger(__name__)

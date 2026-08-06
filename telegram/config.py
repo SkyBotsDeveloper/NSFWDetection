@@ -1,5 +1,6 @@
 import logging
 import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -51,6 +52,23 @@ def _bool(name: str, default: bool = False) -> bool:
     if not raw:
         return default
     return raw.lower() in {"1", "true", "yes", "on", "enable", "enabled"}
+
+
+def _default_cache_db() -> Path:
+    configured = _str("LOCAL_CACHE_DB")
+    if configured:
+        return Path(configured).expanduser().resolve()
+
+    if os.name == "nt":
+        return Path("./data/nsfw_cache.sqlite").resolve()
+    return Path("/tmp/nsfw_cache.sqlite").resolve()
+
+
+def _default_temp_dir() -> Path:
+    configured = _str("TEMP_DIR")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return Path(tempfile.gettempdir()).resolve()
 
 
 @dataclass(frozen=True)
@@ -138,7 +156,7 @@ settings = Settings(
     mongo_uri=_str("MONGO_URI", "mongodb://localhost:27017"),
     database_name=_str("DATABASE_NAME", "nsfw"),
     mongo_timeout_ms=_int("MONGO_TIMEOUT_MS", 5000, 500),
-    local_cache_db=Path(_str("LOCAL_CACHE_DB", "./data/nsfw_cache.sqlite")).resolve(),
+    local_cache_db=_default_cache_db(),
     hot_cache_max_size=_int("HOT_CACHE_MAX_SIZE", 10000, 1),
     hot_cache_ttl_seconds=_float("HOT_CACHE_TTL_SECONDS", 86400.0, 1.0),
     clean_media_cache_ttl_seconds=_float("CLEAN_MEDIA_CACHE_TTL_SECONDS", 3600.0, 0.0),
@@ -180,7 +198,7 @@ settings = Settings(
     session_name=_str("SESSION_NAME", "antinsfw"),
     pyrogram_workers=_int("PYROGRAM_WORKERS", 32, 1),
     pyrogram_sleep_threshold_seconds=_int("PYROGRAM_SLEEP_THRESHOLD_SECONDS", 30, 0),
-    temp_dir=Path(_str("TEMP_DIR", "tmp")).resolve(),
+    temp_dir=_default_temp_dir(),
     log_level=_str("LOG_LEVEL", "INFO").upper(),
 )
 
